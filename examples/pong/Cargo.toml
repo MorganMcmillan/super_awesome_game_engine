@@ -1,6 +1,6 @@
 [package]
-name = "pong"
-description = "Milestone 0: headless Pong with a determinism harness, one Python rule and an SDL3 window."
+name = "pong_py"
+description = "Pong written in Python on the Flecs binding, with native collision."
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -10,6 +10,6 @@ publish.workspace = true
 sage_core.workspace = true
 sage_collision.workspace = true
 sage_script.workspace = true
+sage_ecs_py.workspace = true
 sage_platform.workspace = true
 flecs_ecs.workspace = true
-pyo3.workspace = true
