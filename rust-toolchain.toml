@@ -1,0 +1,4 @@
+[toolchain]
+# Pinned. flecs_ecs 0.2.2 needs edition 2024. Bump deliberately.
+channel = "1.99.1"
+components = ["rustfmt", "clippy"]

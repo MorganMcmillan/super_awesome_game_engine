@@ -1,0 +1,47 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/sage_core",
+    "crates/sage_collision",
+    "crates/sage_script",
+    "crates/sage_platform",
+    "examples/pong",
+    "spikes/flecs_features",
+    "spikes/pyo3_cost",
+]
+default-members = [
+    "crates/sage_core",
+    "crates/sage_collision",
+    "crates/sage_script",
+    "crates/sage_platform",
+    "examples/pong",
+    "spikes/flecs_features",
+]
+
+[workspace.package]
+version = "0.0.1"
+edition = "2024"
+rust-version = "1.99"
+publish = false
+# License is [Open] (design doc 15); no license is granted yet.
+
+# Every external dependency is pinned exactly. See docs/dependencies.md for
+# licenses and why each one is here.
+[workspace.dependencies]
+# Default features: a reduced set fails to compile (pregenerated bindings reference the alerts addon). See docs/spikes/S1.md.
+flecs_ecs = { version = "=0.2.2" }
+pyo3 = { version = "=0.30.1" }
+# Static build of the vendored SDL 3.4.20 (needs CMake and a C compiler). See docs/spikes/S5.md.
+sdl3 = { version = "=0.22.1", features = ["build-from-source-static"] }
+parry2d = { version = "=0.31.1" }
+
+sage_core = { path = "crates/sage_core" }
+sage_collision = { path = "crates/sage_collision" }
+sage_script = { path = "crates/sage_script" }
+sage_platform = { path = "crates/sage_platform" }
+
+[profile.dev]
+# Flecs's C code and the Python interpreter are slow unoptimized; keep our own
+# code debuggable but optimize dependencies.
+[profile.dev.package."*"]
+opt-level = 2

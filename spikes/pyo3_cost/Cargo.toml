@@ -1,0 +1,11 @@
+[package]
+name = "spike_pyo3_cost"
+description = "Spike S4: PyO3 embedding cost, per-entity callbacks vs column views."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+[dependencies]
+sage_script.workspace = true
+pyo3.workspace = true

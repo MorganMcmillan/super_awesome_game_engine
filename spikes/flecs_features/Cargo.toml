@@ -1,0 +1,10 @@
+[package]
+name = "spike_flecs_features"
+description = "Spikes S1 and S2: which Flecs features the pinned bindings reach. Kept as regression tests."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+[dependencies]
+flecs_ecs.workspace = true

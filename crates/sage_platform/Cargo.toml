@@ -1,0 +1,11 @@
+[package]
+name = "sage_platform"
+description = "Presentation: SDL3 window, keyboard input and drawing behind the Renderer trait. Reads simulation state only."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+[dependencies]
+sage_core.workspace = true
+sdl3.workspace = true

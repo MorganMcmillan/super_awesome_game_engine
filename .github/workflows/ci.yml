@@ -1,0 +1,73 @@
+# Acceptance A4: the workspace builds and tests pass on Windows and Linux.
+name: ci
+on:
+  push:
+  pull_request:
+
+jobs:
+  test:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [windows-latest, ubuntu-latest]
+    runs-on: ${{ matrix.os }}
+    env:
+      CARGO_TERM_COLOR: always
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      # SDL3 is built from source (static); it needs CMake and, on Linux, the
+      # X11/Wayland/audio development headers. xvfb provides a display for the
+      # windowed smoke test.
+      - name: Linux build dependencies
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y cmake ninja-build xvfb \
+            libx11-dev libxext-dev libxrandr-dev libxcursor-dev libxfixes-dev libxi-dev \
+            libxss-dev libxtst-dev libxkbcommon-dev libwayland-dev libdecor-0-dev \
+            libegl1-mesa-dev libgl1-mesa-dev libgles2-mesa-dev \
+            libasound2-dev libpulse-dev libpipewire-0.3-dev libdbus-1-dev libudev-dev
+
+      # rust-toolchain.toml pins the version; rustup installs it on first use.
+      - name: Toolchain
+        run: rustup show active-toolchain
+
+      - uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-cargo-${{ hashFiles('Cargo.lock', 'rust-toolchain.toml') }}
+
+      - name: Format
+        run: cargo fmt --all --check
+
+      - name: Lint
+        run: cargo clippy --workspace --all-targets -- -D warnings
+
+      - name: Test (debug)
+        run: cargo test --workspace
+        env:
+          LD_LIBRARY_PATH: ${{ env.pythonLocation }}/lib
+
+      # S8 asks for identical collision output across debug and release.
+      - name: Test (release)
+        run: cargo test --workspace --release
+        env:
+          LD_LIBRARY_PATH: ${{ env.pythonLocation }}/lib
+
+      - name: Windowed smoke (A2)
+        if: runner.os == 'Windows'
+        run: cargo test -p pong --test cli -- --ignored
+
+      - name: Windowed smoke (A2)
+        if: runner.os == 'Linux'
+        run: xvfb-run -a cargo test -p pong --test cli -- --ignored
+        env:
+          LD_LIBRARY_PATH: ${{ env.pythonLocation }}/lib

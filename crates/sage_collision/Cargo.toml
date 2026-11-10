@@ -1,0 +1,11 @@
+[package]
+name = "sage_collision"
+description = "Collision queries over our own data and the contact table (design doc 8.2)."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+[dependencies]
+sage_core.workspace = true
+parry2d.workspace = true
