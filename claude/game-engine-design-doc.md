@@ -1,6 +1,6 @@
 # Morgan's Super Awesome Game Engine: Design Doc (working draft)
 
-Last updated: 2026-11-09 (revision 4) · Status: Milestone 0 implemented, A3 and A4 pending (`docs/milestone-0.md`); Python–Flecs binding implemented (`crates/sage_ecs_py`)
+Last updated: 2026-11-09 (revision 4) · Status: Milestone 0 implemented, A1 to A4 pass (`docs/milestone-0.md`); Python–Flecs binding implemented (`crates/sage_ecs_py`)
 Tags used below: **[Decided]** settled in discussion · **[Leaning]** preferred but not final · **[Open]** unresolved
 
 **Changes in revision 4 (2026-11-09, Python–Flecs binding):** Morgan asked for complete games written in Python on Flecs. Records Morgan's decisions on Python component storage (3.1) and on the `@system` decorator family (5.4); the [Decided] item in 5.4 changes. Adds a [Leaning] item on the iteration order of Python systems (3.3), a new [Open] item on hashing opaque components (3.3), binding findings at the pin (3.4), and glossary entries for views and opaque components. 13.2 and 13.5 record that this work proceeded while Milestone 0 is open, with Morgan's authorization. Code: `crates/sage_ecs_py` (binding) and `examples/pong` (Pong with every rule in Python).
@@ -398,13 +398,13 @@ Three approaches were weighed:
 **Acceptance (each checkable by a script)**
 - **A1, determinism:** replaying one recorded input file twice produces the same world-state hash at every tick. The harness includes a deliberate nondeterminism canary that it must catch (S3).
 - **A2, Pong plays:** a scripted headless run reaches `GameOver` with the expected winner and score; a windowed run opens and draws the court.
-- *Status 2026-11-09:* A1 and A2 pass. A3 (both candidates, decided by Morgan) passes. A4: every CI step passes when run locally on Windows 11 and on Linux (Ubuntu 22.04, WSL2); the hosted GitHub Actions run waits on a remote. Observed in passing: replay hashes are identical across Windows and Linux (`docs/spikes/S3.md`). See `docs/milestone-0.md`.
+- *Status 2026-11-09:* A1 and A2 pass. A3 (both candidates, decided by Morgan) passes. A4: every CI step passes when run locally on Windows 11 and on Linux (Ubuntu 22.04, WSL2); the hosted GitHub Actions run (Windows and Linux) succeeded at commit 054a14e, and Morgan accepted A4 on 2026-11-10. Observed in passing: replay hashes are identical across Windows and Linux (`docs/spikes/S3.md`). See `docs/milestone-0.md`.
 - **A3 [Decided, 2026-11-09, Morgan]:** both candidates. (C1) Over full scripted games, the contact table's begin/stay/end equal the set algebra of 8.2, each begin produces exactly one `ContactBegin` event in canonical order and none while `play` is disabled, and each ball-paddle contact causes exactly one bounce. (C2) Restoring a snapshot taken at tick N reproduces the hash recorded at tick N and every later tick's hash; a snapshot missing the previous contact set is detected. Checked by `examples/pong/tests/a3_candidates.rs`. (Exercise 16 asked for one assertion; Morgan chose to adopt both candidates.)
 - **A4, build:** the workspace builds and tests pass in CI on Windows and Linux.
 
 ### 13.2 Non-goals until Milestone 0 is accepted
 3D; rigid-body physics; audio; the UI module; the asset pipeline; scenes, migrations and save games; any editor, including blocks; genre kits; animation; export and mobile, web and VR targets; networking; the Python-class generation from reflection (until S1 and S4 report).
-*Note 2026-11-09:* S1 and S4 have reported, which lifts the last item. The Python–Flecs binding and the Python port of Pong were built while Milestone 0 is still open (the hosted CI run for A4 is pending), at Morgan's request. Rust Pong and its acceptance tests are unchanged.
+*Note 2026-11-09:* S1 and S4 have reported, which lifts the last item. The Python–Flecs binding and the Python port of Pong were built while Milestone 0 is still open (A4's hosted CI run has since passed), at Morgan's request. Rust Pong and its acceptance tests are unchanged.
 *Note 2026-11-10:* Milestone 1 (13.3) was started while Milestone 0 is still open, at Morgan's request (the `/goal` to implement up to M1). That lifts two items on this list: audio, and the asset pipeline (basics only: PNG and WAV, stable ids, a content-hashed cache). The others still apply.
 
 ### 13.3 Roadmap sketch [Leaning, revise after Milestone 0]

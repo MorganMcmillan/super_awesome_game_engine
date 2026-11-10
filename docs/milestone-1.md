@@ -2,7 +2,7 @@
 
 Date: 2026-11-10. Scope: design doc 13.3, "2D renderer on the SDL GPU API, asset pipeline basics, audio, input mapping".
 
-Milestone 0 is still open (the hosted CI run for A4 is pending). M1 was started at Morgan's request. Decisions Morgan made for this milestone:
+Milestone 0's A4 passed on hosted CI at 054a14e; the M1 commit has not run on CI yet, and Linux is unverified for M1 (Morgan: verify later). M1 was started at Morgan's request. Decisions Morgan made for this milestone:
 - Start M1 now, before M0 is accepted.
 - New dependencies: "minimal", meaning only a shader step and a PNG decoder. Audio is WAV only.
 - Renderer scope: sprite batching, an orthographic camera with a pixel-perfect mode, and bitmap-font text.
