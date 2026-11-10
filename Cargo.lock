@@ -424,6 +424,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "pong_py"
+version = "0.0.1"
+dependencies = [
+ "flecs_ecs",
+ "sage_collision",
+ "sage_core",
+ "sage_ecs_py",
+ "sage_platform",
+ "sage_script",
+]
+
+[[package]]
 name = "portable-atomic"
 version = "1.15.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -593,6 +605,16 @@ dependencies = [
 [[package]]
 name = "sage_core"
 version = "0.0.1"
+
+[[package]]
+name = "sage_ecs_py"
+version = "0.0.1"
+dependencies = [
+ "flecs_ecs",
+ "pyo3",
+ "sage_core",
+ "sage_script",
+]
 
 [[package]]
 name = "sage_platform"

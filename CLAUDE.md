@@ -9,6 +9,7 @@ A game engine for rapid prototyping with a low skill floor and a high ceiling. G
 - `claude/game-engine-design-doc.md` is the design. Read "How to use this document" and the tag meanings first. The design doc plans to move it to `docs/design.md`; ask Morgan before moving it. Until then the `claude/` copy is authoritative.
 - `claude/design-exercises.md` is design homework for Morgan ("exercise N" in the design doc). Do not attempt it.
 - `docs/milestone-0.md`: acceptance status and the placeholders waiting on Morgan. `docs/spikes/<id>.md`: spike write-ups. `docs/dependencies.md`: pins and licenses.
+- The Python–Flecs binding (`sage_ecs_py`, design doc 3.1 and 5.4, revision 4) and a Python port of Pong (`examples/pong_py`) were added at Morgan's request while Milestone 0 is open.
 - Milestone 0 (design doc 13.1) is implemented: A1–A3 pass (A3 = both candidates, chosen by Morgan); A4 passes locally on Windows and Linux, and the hosted CI run is pending. Section 13.2 lists the non-goals that still apply until Milestone 0 is accepted.
 
 ## Commands
@@ -18,16 +19,20 @@ A game engine for rapid prototyping with a low skill floor and a high ceiling. G
 - Lint and format (CI uses both): `cargo clippy --workspace --all-targets -- -D warnings`, `cargo fmt --all`
 - Run Pong: `cargo run -p pong -- play` (W/S and Up/Down, Esc quits). Also `headless [--seed N] [--record FILE]`, `replay FILE [--hashes OUT]`, `smoke [--frames N]`.
 - S4 benchmark: `cargo run --release -p spike_pyo3_cost`
+- Python Pong: `cargo run -p pong_py -- play` (same commands as `pong`). Python system cost: `cargo test --release -p sage_ecs_py --test cost -- --ignored --nocapture`
 - The toolchain is pinned to 1.99.1 in `rust-toolchain.toml`. The first build compiles Flecs C and SDL3 from source (about 6 minutes; needs CMake and a C compiler). Python 3.12 must be installed and its DLL/shared library findable at run time.
 
 ## Architecture
 - `crates/sage_core`: the deterministic core, with no external dependencies. `Simulation` trait (`step(TickInput)`, `tick`, `state_hash`), `InputRecording` (text format `sage-input v1`), `Rng` (xoshiro256**), `StateHasher` (FNV-1a), the replay harness (`replay_twice`, `first_divergence`), `StableId`, `CODENAME`, `TICK_DT`. `host.rs` is the host interface: the simulation hands presentation a `Frame` snapshot, and only `TickInput` flows back.
 - `crates/sage_collision`: `detect()` (sweep and prune, then the parry cuboid narrow phase; canonical `a < b` output sorted by pair) and `ContactTable` (current and previous sets; begin/stay/end by sorted merge; the previous set is hashed for rewind).
-- `crates/sage_script`: embedded CPython. `init()` starts it once per process through `PyConfig` (isolated, hash seed 0). `Script::load` runs source in fresh globals and discovers `@sage.on(event)` handlers in name order. The `sage` Python package is defined inline (`PACKAGE_SOURCE`).
+- `crates/sage_script`: embedded CPython. `init()` starts it once per process through `PyConfig` (isolated, hash seed 0). `Script::load` runs source in fresh globals and discovers `@sage.on(event)` handlers in name order. The `sage` package's `__init__.py` is embedded from `python/sage/` (`PACKAGE_SOURCE`).
+- `crates/sage_ecs_py`: the Python–Flecs binding (design doc 3.1, 5.4). `Ecs::new(&world, seed, module_name)`, then `ecs.load(name, source)` runs a script with a `world` global. Rust half (`sage._ecs`): `registry.rs` (per-world state, view validity), `value.rs` (`Value` base class and `Field` descriptors), `api.rs` (`NativeWorld`, `Entity`), `callbacks.rs` (systems and observers built on the C API with query `expr`), `state.rs` (generic hash, snapshot, restore). Python half (`sage.ecs`): `python/sage/ecs.py` (`@component`, decorators, signature analysis, `World`/`FlecsModule` wrappers). Host-owned native flecs modules are added with `Ecs::add_native_module` and instantiated from Python with `import_native`.
+- `python/sage/`: the whole `sage` Python package as real files, embedded by `include_str!` (`__init__.py` by `sage_script`, `ecs.py` by `sage_ecs_py`). `ecs.pyi` and `_ecs.pyi` are type stubs for editors only; keep them in step with `ecs.py` and the `#[pymethods]` in `api.rs`/`value.rs`. `_native.pyi` and `collision.pyi` are *generated* from Pong's native components; regenerate with `UPDATE_STUBS=1 cargo test -p pong_py --test stubs` after changing one (the test fails when they are stale). `pyrightconfig.json` puts `python/` on the editor's path; `examples/pong_py/scripts/__builtins__.pyi` declares the `world` global.
+- `examples/pong_py`: Pong with every rule in `scripts/pong.py`. The host provides only the reflected native vocabulary (`sage.collision.Position`, `Collider`, `ContactBegin`, `sage.Input`, `sage.Clock`) and the native `collision` flecs module. `tests/game.rs` applies A1, A2 and A3 C2 to it.
 - `crates/sage_platform`: presentation. The `Renderer` and `Presentable` traits, `SdlRenderer` (SDL Render API, the throwaway renderer for M0), `InputMap`, and `run_windowed` (a wall-clock accumulator that steps a fixed number of ticks and records input per tick).
 - `examples/pong`: the Milestone 0 game. `src/sim.rs` holds the Flecs world: flecs modules `PongCore` (always on: clock, game-state machine) and `PongPlay` (enabled only while `Playing`: input, movement, `DetectContacts`, and the observers `BounceBall`, `BallHitsSide`, `OnGoal`). Custom phases run SimInput → SimMove → SimDetect → SimReact after OnUpdate. `scripts/rules.py` is the Python scoring rule. `tests/acceptance.rs` and `tests/cli.rs` cover A1 and A2; `tests/a3_candidates.rs` is A3 (both candidates, C1 and C2). `Pong::snapshot`/`restore` must cover everything `state_hash` covers.
 - `spikes/flecs_features`: S1/S2 regression tests for the pinned Flecs. `spikes/pyo3_cost`: the S4 benchmark.
-- Dependency direction: simulation crates (`sage_core`, `sage_collision`, `sage_script`) never depend on `sage_platform`. Only the app (`pong`) wires them together.
+- Dependency direction: simulation crates (`sage_core`, `sage_collision`, `sage_script`, `sage_ecs_py`) never depend on `sage_platform`. Only the app (`pong`) wires them together.
 
 ## Flecs binding gotchas (flecs_ecs 0.2.2, C 4.1.2)
 - Entity paths use `::` (`flecs::core::ChildOf`). A module's path includes the Rust module path, so look things up relative to the module entity.
@@ -35,6 +40,17 @@ A game engine for rapid prototyping with a low skill floor and a high ceiling. G
 - Systems that emit events or toggle modules are `.immediate(true)`, so their effects apply in order instead of at a sync point.
 - `Parent` (non-fragmenting `ChildOf`) does not exist at this version (S1).
 - Disabling a module entity disables its systems and observers (S2). Pause and feature-off rely on this.
+- With an `Inheritable` base, `ecs_field_size` returns the term's size, not the matched (derived) column's. Take the stride from `ecs_get_type_info(ecs_field_id(..))`.
+- `ecs_emit` with an empty id list reaches only `_` (Any) observers. Emit with the entity's ids; Any observers then fire once per id, so de-duplicate on `it.event_cur`.
+- To include prefabs and disabled entities in a query, add optional `Prefab` and `Disabled` terms; the `EcsQueryMatchPrefab`/`EcsQueryMatchDisabled` desc flags had no effect at this pin. `IsA` is transitive, so `(IsA, Base)` matches instances of derived prefabs.
+
+## Python binding gotchas (`sage_ecs_py`)
+- Python objects hold a registry *id*, never an `Rc`: script classes and globals are cyclic garbage that Python may free on any thread. Lookups only succeed on the world's own thread.
+- A view (system parameter, `entity.get(C)` inside a callback) is valid only while its callback scope is open and no structural change has happened since. Every operation that may move component data in immediate mode must call `Registry::structural_change`.
+- Python systems require `sage.StableId` and run in StableId order. Entities created natively need `Ecs::assign_sid` to be seen. `sage.StableId` is `(OnInstantiate, DontInherit)`: without that, instances would copy their prefab's StableId.
+- The "currently loading world" stack is keyed by OS thread id: `threading.local` resets between `Python::attach` calls from Rust threads.
+- Native components under `sage.` are importable by path (`Ecs::register_native` calls `sage.ecs._expose_native`). Modules are process-wide but classes are per world, so the module `__getattr__` resolves against the currently loading world: the import only works while a script loads. Its failures raise `ImportError`, because `from m import x` hides an `AttributeError`'s message.
+- New simulation state that the binding does not know (native components without `#[flecs(meta)]` + `register_native`, or tables like `ContactTable`) must be hashed and snapshotted by the host.
 
 ## Rules of the road
 

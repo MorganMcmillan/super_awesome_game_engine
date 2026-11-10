@@ -1,0 +1,13 @@
+[package]
+name = "sage_ecs_py"
+description = "Python bindings to Flecs: components, systems and observers defined in Python."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+[dependencies]
+flecs_ecs.workspace = true
+pyo3.workspace = true
+sage_core.workspace = true
+sage_script.workspace = true

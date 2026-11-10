@@ -4,8 +4,10 @@ members = [
     "crates/sage_core",
     "crates/sage_collision",
     "crates/sage_script",
+    "crates/sage_ecs_py",
     "crates/sage_platform",
     "examples/pong",
+    "examples/pong_py",
     "spikes/flecs_features",
     "spikes/pyo3_cost",
 ]
@@ -13,8 +15,10 @@ default-members = [
     "crates/sage_core",
     "crates/sage_collision",
     "crates/sage_script",
+    "crates/sage_ecs_py",
     "crates/sage_platform",
     "examples/pong",
+    "examples/pong_py",
     "spikes/flecs_features",
 ]
 
@@ -38,6 +42,7 @@ parry2d = { version = "=0.31.1" }
 sage_core = { path = "crates/sage_core" }
 sage_collision = { path = "crates/sage_collision" }
 sage_script = { path = "crates/sage_script" }
+sage_ecs_py = { path = "crates/sage_ecs_py" }
 sage_platform = { path = "crates/sage_platform" }
 
 [profile.dev]

@@ -28,18 +28,10 @@ pub const PY_PACKAGE: &str = "sage";
 /// The hash seed the interpreter is started with.
 pub const HASH_SEED: u64 = 0;
 
-const PACKAGE_SOURCE: &str = r#"
-"""Scripting API. Decorators only mark functions; the engine discovers them."""
-
-def on(event):
-    """Marks a function as the handler for `event`, e.g. ``@sage.on("goal")``."""
-    if not isinstance(event, str):
-        raise TypeError("event name must be a string")
-    def mark(fn):
-        fn.__sage_event__ = event
-        return fn
-    return mark
-"#;
+/// The `sage` package's `__init__.py`. It lives in the repository's
+/// `python/sage/` directory with the rest of the package, so editors can
+/// resolve `import sage` in scripts (see `pyrightconfig.json`).
+const PACKAGE_SOURCE: &str = include_str!("../../../python/sage/__init__.py");
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ScriptError(pub String);
@@ -110,6 +102,16 @@ unsafe fn init_interpreter() -> Result<(), ScriptError> {
     })
 }
 
+/// The `sage` package, for crates that extend it with native parts (such as
+/// the Flecs binding). Starts the interpreter first if needed.
+pub fn package(py: Python<'_>) -> Result<Bound<'_, PyModule>, ScriptError> {
+    init()?;
+    py.import(PY_PACKAGE)
+        .map_err(|e| describe(py, &e))?
+        .cast_into::<PyModule>()
+        .map_err(|e| ScriptError(e.to_string()))
+}
+
 /// One discovered handler: `@sage.on(event) def name(...)`.
 pub struct Handler {
     pub event: String,
@@ -127,6 +129,16 @@ pub struct Script {
 impl Script {
     /// Runs `source` in a fresh namespace and collects its handlers.
     pub fn load(name: &str, source: &str) -> Result<Script, ScriptError> {
+        Self::load_with(name, source, vec![])
+    }
+
+    /// Like [`Script::load`], with extra names (such as `world`) placed in
+    /// the fresh globals before the source runs.
+    pub fn load_with(
+        name: &str,
+        source: &str,
+        prelude: Vec<(String, Py<PyAny>)>,
+    ) -> Result<Script, ScriptError> {
         init()?;
         Python::attach(|py| {
             let fail = |e: PyErr| describe(py, &e);
@@ -135,6 +147,9 @@ impl Script {
             globals
                 .set_item("__builtins__", py.import("builtins").map_err(fail)?)
                 .map_err(fail)?;
+            for (key, value) in prelude {
+                globals.set_item(key, value).map_err(fail)?;
+            }
             let code = CString::new(source)
                 .map_err(|_| ScriptError(format!("{name}: source contains a NUL byte")))?;
             py.run(&code, Some(&globals), None).map_err(fail)?;

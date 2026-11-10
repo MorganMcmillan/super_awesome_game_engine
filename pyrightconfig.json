@@ -1,0 +1,19 @@
+// Editor support for game scripts (Pylance and pyright read this file).
+// The sage package lives in python/sage; scripts in examples/pong_py/scripts
+// get the `world` global from the __builtins__.pyi there.
+{
+  "include": ["python", "examples"],
+  "exclude": ["**/__pycache__", "target"],
+  "pythonVersion": "3.12",
+  // Pylance's default: completions, hovers and undefined names, no strict
+  // type errors. Under "standard", expect reports that are true but noisy for
+  // scripts: `world.lookup` and `entity.get` may return None.
+  "typeCheckingMode": "off",
+  // sage._ecs is native; its stub has no Python source by design.
+  "reportMissingModuleSource": "none",
+  "extraPaths": ["python"],
+  "executionEnvironments": [
+    { "root": "examples/pong_py/scripts", "extraPaths": ["python"] },
+    { "root": ".", "extraPaths": ["python"] }
+  ]
+}
