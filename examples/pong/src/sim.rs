@@ -917,19 +917,22 @@ pub struct EntitySnapshot {
 /// iteration order, which `RandomState` randomizes per map.
 fn add_canary(world: &World) {
     let phases = world.get::<&Phases>(|p| *p);
-    let map: Rc<RefCell<std::collections::HashMap<u32, f32>>> = Rc::new(RefCell::new(
-        (0..32).map(|k| (k, k as f32 * 1e-3)).collect(),
-    ));
+    let map: Rc<RefCell<std::collections::HashMap<u32, ()>>> =
+        Rc::new(RefCell::new((0..32).map(|k| (k, ())).collect()));
     world
         .system_named::<&mut Position>("NondeterminismCanary")
         .with(Ball::id())
         .kind(phases.movement)
         .each(move |pos| {
-            let mut acc = 0.0f32;
-            for v in map.borrow().values() {
-                acc = acc * 0.5 + v; // order-dependent
+            // Fingerprint of the iteration order. The nudge must be far above
+            // f32 precision at the ball's position, or two different orders
+            // can round to the same state and the canary is silently missed
+            // (it was, on a CI runner, with a sub-ulp nudge).
+            let mut fp: u32 = 0;
+            for k in map.borrow().keys() {
+                fp = fp.wrapping_mul(31).wrapping_add(*k);
             }
-            pos.y += acc * 1e-3;
+            pos.y += (fp % 1024) as f32 * 1e-3;
         });
 }
 
