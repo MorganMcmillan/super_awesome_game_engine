@@ -52,7 +52,8 @@ Flecs also provides: prefabs, modules, a query language, a web explorer for insp
 - **[Decided, 2026-11-09, Morgan]** Python component access: Flecs reflection data describes each component's fields, and from it we generate Python component classes. For hot loops, expose component columns as array views (numpy-style) instead of per-entity attribute access (a later `@fast_system`, 5.4). *Note 2026-11-09:* implemented for native components (`world.component_type("path")` builds a class from a `#[flecs(meta)]` component). *Note 2026-11-10 (Morgan's decision):* native components whose Flecs path is under `sage` are also importable by that path while a script loads (`from sage.collision import Position`, `from sage import Input`), so editors can treat them as types. Classes still belong to one world: the shared Python module resolves each name for the world that is loading a script, so the import works at a script's top level, not inside a system body. A component cannot shadow an engine name (`sage.World`) or live under a non-native module (`sage.ecs`). Editor stubs are generated from the same reflection data (`Ecs::type_stubs`) into `python/sage/`, and `examples/pong/tests/stubs.rs` fails when they are stale. `world.component_type` stays for paths outside `sage`.
 - **[Decided, 2026-11-09, Morgan]** Python-defined components: an `@component` class with annotated fields (`x: sage.f32 = 0.0`; `float` means f64, `int` means i64, plus `bool`, `Entity` and explicit `sage.f32/i32/u32/u64/u8`) is registered as a **reflected Flecs struct**. The Python object is either a value that owns its bytes or a **view** onto the stored bytes, so Python-defined and native components share one mechanism and get hashing, snapshots, JSON and future column views for free. A class without fields is a tag. Single inheritance: a subclass appends fields (the base's fields are a layout prefix) and is registered with `(IsA, Base)`, with `Inheritable` on the base, so a query for the base also matches the subclass. `@component(opaque=True)` stores a pointer to an arbitrary Python object instead, deep-copied on copy. Opaque components are not reflected, hashed or snapshotted (see 3.3). *Note:* Morgan first proposed storing a pointer to the Python instance for every component; the pointer form became the opt-in after the costs were laid out (hash, rewind, prefab copies sharing one object, JSON, palette and column views). Arrays and nested struct fields are not supported yet.
 - **Python and threads:** the GIL means Python systems effectively run on one thread. Heavy kit systems should be native; Python is the glue. Free-threaded Python is an option to evaluate later.
-- **Graphics:** SDL's GPU API is a low-level API in the style of Metal, Vulkan and Direct3D 12 and takes only compiled shaders. We therefore write the renderer ourselves (materials, lighting, culling, sprite batching, text) and ship a shader toolchain (SDL_shadercross translates HLSL or SPIR-V to each backend's format). **[Open]** renderer scope is probably the largest single work item (10.7).
+- **Graphics:** SDL's GPU API is a low-level API in the style of Metal, Vulkan and Direct3D 12 and takes only compiled shaders. We therefore write the renderer ourselves (materials, lighting, culling, sprite batching, text) and ship a shader toolchain (SDL_shadercross translates HLSL or SPIR-V to each backend's format). **[Open]** renderer scope beyond sprites is probably the largest single work item (10.7).
+  - *Update 2026-11-10 (Milestone 1, Morgan):* M1's renderer scope is **[Decided]**: sprite batching, an orthographic camera with a pixel-perfect mode, and bitmap-font text, on the SDL GPU API. Materials, lighting, shadows, culling and shaped text are not built. The sprite shaders are two small SPIR-V modules assembled by `tools/shaderc`, not compiled from source, because SDL's Vulkan backend binds fragment samplers as combined image samplers (`SDL_gpu_vulkan.c`) and the pure-Rust compiler we looked at (naga) emits separate image and sampler objects. Only SPIR-V is produced, so only SDL's Vulkan backend runs; D3D12 and Metal need DXIL and MSL output (SDL_shadercross or more hand work) and are **[Open]**. A machine without Vulkan falls back to the Render API. See `docs/milestone-1.md`.
 
 ### 3.2 Why not build on an existing engine (Godot)?
 - **[Decided]** Build our own core. The main reasons: Godot has no official Python support and community bindings are immature; GDExtension compatibility depends on engine minor versions; and our central bet (the game as a database with rewind, "Why?" and always-live editing) breaks when a host engine keeps state outside our world.
@@ -307,11 +308,13 @@ Three approaches were weighed:
 - 2D gets its own collision systems (tile/AABB/integer physics, per the Celeste lesson in section 11); parry has separate 2D and 3D variants.
 - The **scene carries the mode**, not each entity. The editor and block palette read it (2D hides z; "turn 15 degrees" works in 2D and needs an axis in 3D).
 - One GPU renderer with an orthographic camera for 2D, plus a pixel-perfect mode (snapping, nearest sampling, integer scaling). SDL's simpler Render API would add a second renderer, so avoid it in the long term (Milestone 0 may use it as a throwaway behind a trait; see 13.1).
+  - *Status 2026-11-10 (M1):* done as `sage_platform::gpu` and `sprite`. Pixel-perfect mode means an integer scale (at least 1), a whole-pixel origin, rounded edges and nearest sampling. The camera is applied on the CPU, so batches hold clip-space vertices. The Render API stays as `SdlRenderer`, the fallback when GPU setup fails, which keeps a second renderer alive for now.
 
 ### 10.2 Audio
 - Use Godot's model: buses, players, a listener. As ECS: an `AudioPlayer` component (stream asset, bus, volume, pitch, loop, playing), an `AudioListener`, and buses as entities whose effect chains are `OrderedChildren`.
 - SDL3 mixes every audio stream bound to a device, handles uncompressed PCM, and has a basic WAV loader. Decoding other formats is ours, and (as far as found) so are buses, effects and spatialization.
 - **[Leaning]** Audio is **presentation**: the simulation emits sound commands, audio consumes them, and nothing flows back. One-shot effects are commands to the audio side, not entities. **[Open]** whether rewind replays or suppresses sounds.
+  - *Status 2026-11-10 (M1):* implemented as sound **cues**: the window loop asks `Presentable::take_cues` after every step and a software mixer (`sage_platform::mixer`) plays the named sound through one SDL audio stream. Pong derives its cues by comparing state before and after a step, so it needs no simulation change. Sounds are WAV only and mono once loaded. Buses, effects, spatialization, `AudioPlayer` and `AudioListener` components are not built.
 
 ### 10.3 Assets and import
 - Treat import as ETL: source file → importer → cooked engine format, cached by content hash, with sidecar import settings (as in Godot).
@@ -339,11 +342,11 @@ Three approaches were weighed:
 
 ### 10.7 Known gaps (by retrofit cost)
 1. Game loop and threading model (3.3).
-2. Renderer scope (3.1): materials, lighting, shadows, culling, sprite batching, text.
+2. Renderer scope (3.1): materials, lighting, shadows, culling, sprite batching, text. *M1 (2026-11-10): sprite batching and bitmap text done; the rest open.*
 3. Animation: sprite, skeletal, tweens, state machines (the limb system depends on it), plus particles.
 4. Editor core: undo/redo as a transaction log, play-in-editor via world snapshot and restore, live reload of Python.
 5. Beginner debugging: errors mapped back to blocks, glowing active blocks, step / pause / rewind, profiler.
-6. Input mapping: actions, rebinding, gamepad, touch, VR controllers.
+6. Input mapping: actions, rebinding, gamepad, touch, VR controllers. *M1 (2026-11-10): keys and gamepad buttons and sticks map to game input bits, with rebinding and a text form for saved bindings (`sage_platform::input`). Touch, mouse and VR controllers are open.*
 7. Save games and settings (shares serialization with scenes).
 8. Safety of shared kits: downloaded kits are code someone else wrote, so a sandbox or permission model, plus license tracking.
 9. Native extension story (the skill ceiling). Rust has no stable ABI, so how do advanced users add native systems?
@@ -402,10 +405,11 @@ Three approaches were weighed:
 ### 13.2 Non-goals until Milestone 0 is accepted
 3D; rigid-body physics; audio; the UI module; the asset pipeline; scenes, migrations and save games; any editor, including blocks; genre kits; animation; export and mobile, web and VR targets; networking; the Python-class generation from reflection (until S1 and S4 report).
 *Note 2026-11-09:* S1 and S4 have reported, which lifts the last item. The Python–Flecs binding and the Python port of Pong were built while Milestone 0 is still open (the hosted CI run for A4 is pending), at Morgan's request. Rust Pong and its acceptance tests are unchanged.
+*Note 2026-11-10:* Milestone 1 (13.3) was started while Milestone 0 is still open, at Morgan's request (the `/goal` to implement up to M1). That lifts two items on this list: audio, and the asset pipeline (basics only: PNG and WAV, stable ids, a content-hashed cache). The others still apply.
 
 ### 13.3 Roadmap sketch [Leaning, revise after Milestone 0]
 - **M0** headless Pong, determinism harness, one Python system (13.1).
-- **M1** 2D renderer on the SDL GPU API, asset pipeline basics, audio, input mapping.
+- **M1** 2D renderer on the SDL GPU API, asset pipeline basics, audio, input mapping. *Implemented 2026-11-10; see `docs/milestone-1.md` for the checks and the gaps.*
 - **M2** UI module, scene format with migrations, save games.
 - **M3** editor core: inspector, undo/redo, play-in-editor, text editing of Python.
 - **M4** block editor round trip (`libcst`), palette generated from reflection.
@@ -416,6 +420,7 @@ Three approaches were weighed:
 Each spike produces a short write-up (`docs/spikes/<id>.md`) and updates the relevant tags in this document in the same change. Spikes S1–S5 and S8 gate Milestone 0; S6 and S7 can run in parallel and do not block it.
 
 *Status 2026-11-09:* S1 pass (gap: `Parent`), S2 pass, S3 pass, S4 pass, S5 partial (Windows and Linux pass; GPU triangle not attempted), S8 pass. S6 and S7 not started. See `docs/spikes/<id>.md` and `docs/milestone-0.md`.
+*Update 2026-11-10:* S5's remaining half is done in a different form: the GPU API renders the sprite pipeline on Windows (Vulkan), checked against a CPU reference; SDL_shadercross was not used (see 3.1). Linux has not been run for M1.
 
 | ID | Question | Method | Pass criteria | Feeds |
 |---|---|---|---|---|

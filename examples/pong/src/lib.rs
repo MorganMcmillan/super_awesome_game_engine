@@ -18,6 +18,11 @@ use sage_core::{Simulation, StableId, StateHasher, TICK_DT, TickInput};
 use sage_ecs_py::{Ecs, StableIdC};
 use sage_script::Script;
 
+pub mod assets;
+mod shown;
+
+pub use shown::Shown;
+
 pub const SCRIPT: &str = include_str!("../scripts/pong.py");
 
 /// Test-only: a Python system that uses the `random` module, which CPython
@@ -356,6 +361,18 @@ impl Pong {
         TickInput::EMPTY
             .with(up, dy > dead_zone)
             .with(down, dy < -dead_zone)
+    }
+
+    /// Contacts that began during the last tick, as StableId pairs in canonical
+    /// order. Presentation uses them to pick sound cues; they never feed back.
+    pub fn last_contact_begins(&self) -> Vec<(u64, u64)> {
+        self.world.get::<&Contacts>(|c| {
+            c.0.transitions()
+                .begin
+                .iter()
+                .map(|c| (c.a.0, c.b.0))
+                .collect()
+        })
     }
 
     /// A read-only snapshot for presentation (the host interface).

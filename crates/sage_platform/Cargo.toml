@@ -8,4 +8,5 @@ publish.workspace = true
 
 [dependencies]
 sage_core.workspace = true
+sage_assets.workspace = true
 sdl3.workspace = true

@@ -1,24 +1,37 @@
-//! Presentation: window, keyboard and drawing on SDL3.
+//! Presentation: window, input, drawing and sound on SDL3.
 //!
 //! Reads simulation state only through `sage_core::host::Frame` and feeds the
 //! simulation only `TickInput`, which is recorded per tick. Wall-clock time
 //! lives here and decides *how many* ticks to run per frame, never what a
 //! tick computes, so a recorded run replays identically headless.
 //!
-//! Milestone 0 draws with SDL's simple Render API (spike S5 recommendation,
-//! docs/spikes/S5.md); the GPU renderer replaces `SdlRenderer` in M1 behind
-//! the same `Renderer` trait.
+//! Milestone 1 draws with the GPU renderer (`gpu`: sprite batches through
+//! SDL's GPU API, pixel-perfect mode) and keeps `SdlRenderer`, SDL's simple
+//! Render API, as the fallback for machines without Vulkan. Sound is a
+//! software mixer (`mixer`) on one SDL audio stream (`audio`). Input is
+//! mapped to game bits by `input::InputMap`.
 
+pub mod audio;
+pub mod gpu;
+pub mod input;
+pub mod mixer;
+pub mod sprite;
+
+use std::rc::Rc;
 use std::time::{Duration, Instant};
 
+use sage_assets::{Image, Sound};
 use sage_core::host::{DrawKind, Frame};
-use sage_core::{InputRecording, Simulation, TICK_DT, TickInput};
+use sage_core::{InputRecording, Simulation, TICK_DT};
 use sdl3::event::Event;
-use sdl3::keyboard::{Keycode, Scancode};
+use sdl3::gamepad::{Axis, Button, Gamepad};
+use sdl3::keyboard::{KeyboardState, Keycode, Scancode};
 use sdl3::pixels::Color;
 use sdl3::render::FRect;
 use sdl3::render::WindowCanvas;
 
+pub use input::{Binding, InputMap, InputSource};
+pub use sdl3::gamepad::{Axis as PadAxis, Button as PadButton};
 pub use sdl3::keyboard::Scancode as Key;
 
 /// Draws a frame. Implementations must not affect the simulation.
@@ -29,37 +42,55 @@ pub trait Renderer {
 /// A simulation that can describe itself to presentation.
 pub trait Presentable: Simulation {
     fn frame(&self) -> Frame;
-}
 
-/// Maps held keys to input bits. The game owns the meaning of the bits.
-#[derive(Clone, Debug, Default)]
-pub struct InputMap {
-    pub bindings: Vec<(Scancode, u32)>,
-}
-
-impl InputMap {
-    pub fn bind(mut self, key: Scancode, bit: u32) -> Self {
-        self.bindings.push((key, bit));
-        self
+    /// Sound cues (names) that happened during the last `step`. The window
+    /// loop calls this after every step, so none are lost when several ticks
+    /// run in one frame. The default is silence.
+    fn take_cues(&mut self) -> Vec<String> {
+        vec![]
     }
+}
 
-    fn sample(&self, held: impl Fn(Scancode) -> bool) -> TickInput {
-        self.bindings
-            .iter()
-            .fold(TickInput::EMPTY, |acc, &(key, bit)| {
-                acc.with(bit, held(key))
-            })
+/// The fill color of each kind, as RGB bytes. Both renderers use it.
+pub fn kind_rgb(kind: DrawKind) -> [u8; 3] {
+    match kind {
+        DrawKind::Court => [16, 20, 28],
+        DrawKind::Wall => [120, 130, 150],
+        DrawKind::Goal => [60, 30, 40],
+        DrawKind::Paddle => [235, 235, 240],
+        DrawKind::Ball => [255, 200, 60],
     }
 }
 
 pub fn color_of(kind: DrawKind) -> Color {
-    match kind {
-        DrawKind::Court => Color::RGB(16, 20, 28),
-        DrawKind::Wall => Color::RGB(120, 130, 150),
-        DrawKind::Goal => Color::RGB(60, 30, 40),
-        DrawKind::Paddle => Color::RGB(235, 235, 240),
-        DrawKind::Ball => Color::RGB(255, 200, 60),
-    }
+    let [r, g, b] = kind_rgb(kind);
+    Color::RGB(r, g, b)
+}
+
+const KINDS: [DrawKind; 5] = [
+    DrawKind::Court,
+    DrawKind::Wall,
+    DrawKind::Goal,
+    DrawKind::Paddle,
+    DrawKind::Ball,
+];
+
+/// Counts pixels of each `DrawKind` color in an RGBA image. Slow; for smoke tests.
+pub fn count_kind_pixels(img: &Image) -> Vec<(DrawKind, usize)> {
+    KINDS
+        .iter()
+        .map(|&k| {
+            let c = kind_rgb(k);
+            let n = img
+                .rgba
+                .as_chunks::<4>()
+                .0
+                .iter()
+                .filter(|p| p[0] == c[0] && p[1] == c[1] && p[2] == c[2])
+                .count();
+            (k, n)
+        })
+        .collect()
 }
 
 pub const BACKGROUND: Color = Color::RGB(0, 0, 0);
@@ -84,26 +115,17 @@ impl SdlRenderer {
             .convert_format(sdl3::pixels::PixelFormat::RGBA32)
             .map_err(|e| e.to_string())?;
         let (w, pitch) = (surface.width() as usize, surface.pitch() as usize);
-        let kinds = [
-            DrawKind::Court,
-            DrawKind::Wall,
-            DrawKind::Goal,
-            DrawKind::Paddle,
-            DrawKind::Ball,
-        ];
         Ok(surface.with_lock(|bytes| {
-            kinds
-                .iter()
-                .map(|&k| {
-                    let c = color_of(k);
-                    let n = bytes
-                        .chunks(pitch)
-                        .flat_map(|row| row[..w * 4].chunks(4))
-                        .filter(|p| p[0] == c.r && p[1] == c.g && p[2] == c.b)
-                        .count();
-                    (k, n)
-                })
-                .collect()
+            let rgba: Vec<u8> = bytes
+                .chunks(pitch)
+                .flat_map(|row| row[..w * 4].iter().copied())
+                .collect();
+            let img = Image {
+                width: w as u32,
+                height: surface.height(),
+                rgba,
+            };
+            count_kind_pixels(&img)
         }))
     }
 
@@ -152,6 +174,17 @@ impl Renderer for SdlRenderer {
     }
 }
 
+/// Which renderer draws the window.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum RendererChoice {
+    /// The GPU renderer, falling back to the Render API when GPU setup fails.
+    Auto,
+    /// The GPU renderer; setup failure is an error.
+    Gpu,
+    /// SDL's simple Render API.
+    Sdl,
+}
+
 #[derive(Clone, Debug)]
 pub struct WindowOptions {
     pub title: String,
@@ -160,6 +193,30 @@ pub struct WindowOptions {
     /// the window closes or Escape is pressed.
     pub max_frames: Option<u64>,
     pub hidden: bool,
+    pub renderer: RendererChoice,
+    pub scale_mode: sprite::ScaleMode,
+    /// Images drawn instead of the solid color for a `DrawKind` (GPU renderer).
+    pub sprites: Vec<(DrawKind, Image)>,
+    /// Sounds by cue name, played when the simulation emits that cue.
+    pub sounds: Vec<(String, Rc<Sound>)>,
+    /// Open an audio device. Failure to open one is reported and the run is silent.
+    pub audio: bool,
+}
+
+impl WindowOptions {
+    pub fn new(title: impl Into<String>, size: (u32, u32)) -> WindowOptions {
+        WindowOptions {
+            title: title.into(),
+            size,
+            max_frames: None,
+            hidden: false,
+            renderer: RendererChoice::Auto,
+            scale_mode: sprite::ScaleMode::PixelPerfect,
+            sprites: vec![],
+            sounds: vec![],
+            audio: true,
+        }
+    }
 }
 
 #[derive(Debug)]
@@ -168,6 +225,39 @@ pub struct WindowRun {
     pub frames: u64,
     /// Pixel counts from the last frame, when `max_frames` was set.
     pub last_frame_pixels: Option<Vec<(DrawKind, usize)>>,
+    /// Which renderer ran: `"gpu"` or `"sdl"`.
+    pub renderer: &'static str,
+    /// Sound cues the simulation emitted, and how many had a registered sound.
+    pub cues_emitted: u64,
+    pub cues_played: u64,
+    /// Whether an audio device was open.
+    pub audio: bool,
+}
+
+enum Backend {
+    Gpu(Box<gpu::GpuRenderer>),
+    Sdl(SdlRenderer),
+}
+
+/// Live keyboard and gamepad state for `InputMap::sample`.
+struct Live<'a> {
+    keys: KeyboardState<'a>,
+    pads: &'a [Gamepad],
+}
+
+impl InputSource for Live<'_> {
+    fn key(&self, key: Scancode) -> bool {
+        self.keys.is_scancode_pressed(key)
+    }
+    fn pad_button(&self, button: Button) -> bool {
+        self.pads.iter().any(|p| p.button(button))
+    }
+    fn pad_axis(&self, axis: Axis) -> f32 {
+        self.pads
+            .iter()
+            .map(|p| f32::from(p.axis(axis)) / 32767.0)
+            .fold(0.0, |a: f32, b| if b.abs() > a.abs() { b } else { a })
+    }
 }
 
 /// Runs `sim` in a window at the fixed tick rate, recording input per tick.
@@ -186,8 +276,45 @@ pub fn run_windowed<S: Presentable>(
         builder.hidden();
     }
     let window = builder.build().map_err(|e| e.to_string())?;
-    let mut renderer = SdlRenderer::new(window.into_canvas());
+    let gpu = |window: &sdl3::video::Window| -> Result<Backend, String> {
+        let mut r = gpu::GpuRenderer::new(window.clone())?;
+        r.mode = options.scale_mode;
+        for (kind, image) in &options.sprites {
+            let tex = r.add_texture(image)?;
+            r.skin.sprites.push((*kind, tex));
+        }
+        Ok(Backend::Gpu(Box::new(r)))
+    };
+    let mut backend = match options.renderer {
+        RendererChoice::Sdl => Backend::Sdl(SdlRenderer::new(window.clone().into_canvas())),
+        RendererChoice::Gpu => gpu(&window)?,
+        RendererChoice::Auto => gpu(&window).unwrap_or_else(|e| {
+            eprintln!("note: GPU renderer unavailable ({e}); using the SDL Render API");
+            Backend::Sdl(SdlRenderer::new(window.clone().into_canvas()))
+        }),
+    };
     let mut events = sdl.event_pump().map_err(|e| e.to_string())?;
+    let pads_subsystem = sdl.gamepad().map_err(|e| e.to_string())?;
+    let mut pads: Vec<Gamepad> = pads_subsystem
+        .gamepads()
+        .unwrap_or_default()
+        .into_iter()
+        .filter_map(|id| pads_subsystem.open(id).ok())
+        .collect();
+
+    let mut audio = None;
+    if options.audio {
+        match audio::AudioOut::open(&sdl) {
+            Ok(mut out) => {
+                for (cue, sound) in &options.sounds {
+                    out.register(cue, sound.clone());
+                }
+                audio = Some(out);
+            }
+            Err(e) => eprintln!("note: no audio ({e}); running silent"),
+        }
+    }
+    let (mut cues_emitted, mut cues_played) = (0u64, 0u64);
 
     let mut recording = InputRecording::new(seed);
     let tick_len = Duration::from_secs_f32(TICK_DT);
@@ -204,6 +331,14 @@ pub fn run_windowed<S: Presentable>(
                     keycode: Some(Keycode::Escape),
                     ..
                 } => break 'run,
+                Event::GamepadAdded { which, .. } => {
+                    if let Ok(pad) = pads_subsystem.open(which) {
+                        pads.push(pad);
+                    }
+                }
+                Event::GamepadRemoved { which, .. } => {
+                    pads.retain(|p| p.id().is_ok_and(|id| id != which));
+                }
                 _ => {}
             }
         }
@@ -216,22 +351,60 @@ pub fn run_windowed<S: Presentable>(
         }
         last = now;
         while accumulator >= tick_len {
-            let keys = events.keyboard_state();
-            let input = input_map.sample(|k| keys.is_scancode_pressed(k));
+            let live = Live {
+                keys: events.keyboard_state(),
+                pads: &pads,
+            };
+            let input = input_map.sample(&live);
             recording.record(sim.tick(), input);
             sim.step(input);
+            for cue in sim.take_cues() {
+                cues_emitted += 1;
+                if let Some(out) = audio.as_mut()
+                    && out.cue(&cue)
+                {
+                    cues_played += 1;
+                }
+            }
             accumulator -= tick_len;
         }
-        renderer.draw(&sim.frame())?;
+        if let Some(out) = audio.as_mut() {
+            out.pump()?;
+        }
+        let frame = sim.frame();
+        match &mut backend {
+            Backend::Gpu(r) => r.draw(&frame)?,
+            Backend::Sdl(r) => r.draw(&frame)?,
+        }
         frames += 1;
         if let Some(max) = options.max_frames
             && frames >= max
         {
-            last_frame_pixels = Some(renderer.count_colored_pixels()?);
-            renderer.present();
+            last_frame_pixels = Some(match &mut backend {
+                Backend::Gpu(r) => {
+                    // Read back through an offscreen render of the same frame:
+                    // swapchain textures cannot be downloaded.
+                    let (w, h) = (options.size.0, options.size.1);
+                    let batch = sprite::compose(
+                        &frame,
+                        [w as f32, h as f32],
+                        options.scale_mode,
+                        &sage_assets::BitmapFont::builtin(),
+                        &r.skin,
+                    );
+                    count_kind_pixels(&r.render_to_image(&batch, [w, h])?)
+                }
+                Backend::Sdl(r) => {
+                    let px = r.count_colored_pixels()?;
+                    r.present();
+                    px
+                }
+            });
             break;
         }
-        renderer.present();
+        if let Backend::Sdl(r) = &mut backend {
+            r.present();
+        }
         std::thread::sleep(Duration::from_millis(1));
     }
     // Make the recording cover every tick that ran, even trailing idle ones.
@@ -243,20 +416,12 @@ pub fn run_windowed<S: Presentable>(
         recording,
         frames,
         last_frame_pixels,
+        renderer: match backend {
+            Backend::Gpu(_) => "gpu",
+            Backend::Sdl(_) => "sdl",
+        },
+        cues_emitted,
+        cues_played,
+        audio: audio.is_some(),
     })
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn input_map_sets_bits() {
-        let map = InputMap::default()
-            .bind(Scancode::W, 1)
-            .bind(Scancode::S, 2);
-        assert_eq!(map.sample(|k| k == Scancode::S).buttons, 2);
-        assert_eq!(map.sample(|_| true).buttons, 3);
-        assert_eq!(map.sample(|_| false), TickInput::EMPTY);
-    }
 }

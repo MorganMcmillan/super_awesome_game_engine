@@ -12,4 +12,5 @@ sage_collision.workspace = true
 sage_script.workspace = true
 sage_ecs_py.workspace = true
 sage_platform.workspace = true
+sage_assets.workspace = true
 flecs_ecs.workspace = true

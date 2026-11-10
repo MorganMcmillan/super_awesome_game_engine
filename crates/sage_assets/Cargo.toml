@@ -1,0 +1,10 @@
+[package]
+name = "sage_assets"
+description = "Asset pipeline basics: stable asset ids, PNG and WAV loading, a bitmap font, a content-hashed catalog. No window or audio device needed."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+[dependencies]
+image.workspace = true

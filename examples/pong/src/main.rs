@@ -5,15 +5,20 @@
 //! pong headless [--seed N] [--record FILE]   scripted game: left bot vs idle right
 //! pong replay   FILE [--hashes OUT]          replay a recording headless
 //! pong smoke    [--frames N]                 open a window, draw, check the court
+//! pong gen-assets                            rewrite examples/pong/assets/
 //! ```
+//! `play` and `smoke` take `--renderer gpu|sdl|auto` (default auto) and `--mute`.
 //! Exit code is non-zero on any failure, so every command is script-checkable.
 
 use std::process::ExitCode;
 
-use pong::{GameState, LEFT_DOWN, LEFT_UP, Pong, PongConfig, RIGHT_DOWN, RIGHT_UP, Side};
+use pong::{GameState, LEFT_DOWN, LEFT_UP, Pong, PongConfig, RIGHT_DOWN, RIGHT_UP, Shown, Side};
+use sage_assets::{AssetKind, AssetStore, Image, Sound};
 use sage_core::host::DrawKind;
 use sage_core::{InputRecording, Simulation, run_recording};
-use sage_platform::{InputMap, Key, Presentable, WindowOptions, run_windowed};
+use sage_platform::{
+    Binding, InputMap, Key, PadAxis, PadButton, RendererChoice, WindowOptions, run_windowed,
+};
 
 struct Args {
     cmd: String,
@@ -22,6 +27,8 @@ struct Args {
     record: Option<String>,
     hashes: Option<String>,
     frames: u64,
+    renderer: RendererChoice,
+    mute: bool,
 }
 
 fn parse() -> Result<Args, String> {
@@ -33,6 +40,8 @@ fn parse() -> Result<Args, String> {
         record: None,
         hashes: None,
         frames: 120,
+        renderer: RendererChoice::Auto,
+        mute: false,
     };
     while let Some(arg) = it.next() {
         let mut value = |name: &str| it.next().ok_or(format!("{name} needs a value"));
@@ -41,31 +50,20 @@ fn parse() -> Result<Args, String> {
             "--record" => a.record = Some(value("--record")?),
             "--hashes" => a.hashes = Some(value("--hashes")?),
             "--frames" => a.frames = value("--frames")?.parse().map_err(|_| "bad --frames")?,
+            "--renderer" => {
+                a.renderer = match value("--renderer")?.as_str() {
+                    "gpu" => RendererChoice::Gpu,
+                    "sdl" => RendererChoice::Sdl,
+                    "auto" => RendererChoice::Auto,
+                    other => return Err(format!("unknown renderer '{other}' (gpu, sdl, auto)")),
+                }
+            }
+            "--mute" => a.mute = true,
             s if !s.starts_with("--") && a.file.is_none() => a.file = Some(s.to_string()),
             s => return Err(format!("unknown argument '{s}'")),
         }
     }
     Ok(a)
-}
-
-struct Shown(Pong);
-
-impl Simulation for Shown {
-    fn step(&mut self, input: sage_core::TickInput) {
-        self.0.step(input)
-    }
-    fn tick(&self) -> u64 {
-        self.0.tick()
-    }
-    fn state_hash(&self) -> u64 {
-        self.0.state_hash()
-    }
-}
-
-impl Presentable for Shown {
-    fn frame(&self) -> sage_core::host::Frame {
-        self.0.frame()
-    }
 }
 
 fn input_map() -> InputMap {
@@ -74,6 +72,41 @@ fn input_map() -> InputMap {
         .bind(Key::S, LEFT_DOWN)
         .bind(Key::Up, RIGHT_UP)
         .bind(Key::Down, RIGHT_DOWN)
+        // The left stick and d-pad of any gamepad drive the left paddle.
+        .bind_input(Binding::PadButton(PadButton::DPadUp), LEFT_UP)
+        .bind_input(Binding::PadButton(PadButton::DPadDown), LEFT_DOWN)
+        .bind_input(
+            Binding::PadAxis {
+                axis: PadAxis::LeftY,
+                positive: false,
+            },
+            LEFT_UP,
+        )
+        .bind_input(
+            Binding::PadAxis {
+                axis: PadAxis::LeftY,
+                positive: true,
+            },
+            LEFT_DOWN,
+        )
+}
+
+type LoadedAssets = (Vec<(DrawKind, Image)>, Vec<(String, std::rc::Rc<Sound>)>);
+
+/// Loads the committed assets through the asset store: the ball sprite, and
+/// every WAV as a cue named after its file.
+fn load_assets() -> Result<LoadedAssets, String> {
+    let mut store = AssetStore::new(pong::assets::DIR);
+    let mut sounds = vec![];
+    for entry in store.catalog()? {
+        if entry.kind == AssetKind::Sound {
+            let (_, sound) = store.load_sound(&entry.path)?;
+            let cue = entry.path.trim_end_matches(".wav").to_string();
+            sounds.push((cue, sound));
+        }
+    }
+    let (_, ball) = store.load_image("ball.png")?;
+    Ok((vec![(DrawKind::Ball, (*ball).clone())], sounds))
 }
 
 fn summary(p: &Pong) -> String {
@@ -95,22 +128,28 @@ fn run(a: Args) -> Result<(), String> {
     match a.cmd.as_str() {
         "play" | "smoke" => {
             let smoke = a.cmd == "smoke";
-            let mut sim = Shown(Pong::new(PongConfig::new(a.seed))?);
-            let run = run_windowed(
-                &mut sim,
-                a.seed,
-                &input_map(),
-                &WindowOptions {
-                    title: format!("{} pong (python)", sage_core::CODENAME),
-                    size: (960, 600),
-                    max_frames: smoke.then_some(a.frames),
-                    hidden: false,
-                },
-            )?;
+            let mut sim = Shown::new(Pong::new(PongConfig::new(a.seed))?);
+            let (sprites, sounds) = load_assets()?;
+            let mut options =
+                WindowOptions::new(format!("{} pong (python)", sage_core::CODENAME), (960, 600));
+            options.max_frames = smoke.then_some(a.frames);
+            options.renderer = a.renderer;
+            options.sprites = sprites;
+            options.sounds = sounds;
+            options.audio = !a.mute;
+            let run = run_windowed(&mut sim, a.seed, &input_map(), &options)?;
             if let Some(path) = &a.record {
                 write(path, &run.recording.to_text())?;
             }
-            println!("frames={} {}", run.frames, summary(&sim.0));
+            println!(
+                "frames={} renderer={} audio={} cues={}/{} {}",
+                run.frames,
+                run.renderer,
+                run.audio,
+                run.cues_played,
+                run.cues_emitted,
+                summary(&sim.pong)
+            );
             if smoke {
                 let px = run.last_frame_pixels.unwrap_or_default();
                 println!("pixels: {px:?}");
@@ -162,8 +201,17 @@ fn run(a: Args) -> Result<(), String> {
             println!("{}", summary(&pong));
             Ok(())
         }
+        "gen-assets" => {
+            std::fs::create_dir_all(pong::assets::DIR).map_err(|e| e.to_string())?;
+            for (name, bytes) in pong::assets::generate()? {
+                let path = format!("{}/{name}", pong::assets::DIR);
+                std::fs::write(&path, &bytes).map_err(|e| format!("{path}: {e}"))?;
+                println!("{name}: {} bytes", bytes.len());
+            }
+            Ok(())
+        }
         other => Err(format!(
-            "unknown command '{other}' (play, headless, replay, smoke)"
+            "unknown command '{other}' (play, headless, replay, smoke, gen-assets)"
         )),
     }
 }
