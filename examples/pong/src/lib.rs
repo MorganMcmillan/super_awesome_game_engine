@@ -162,15 +162,15 @@ fn install_collision(w: *mut sys::ecs_world_t, phase: u64, parent: u64) -> Resul
 
 // ----- the simulation ---------------------------------------------------------------
 
-pub struct PongPyConfig {
+pub struct PongConfig {
     pub seed: u64,
     pub script: String,
     pub nondeterminism_canary: bool,
 }
 
-impl PongPyConfig {
+impl PongConfig {
     pub fn new(seed: u64) -> Self {
-        PongPyConfig {
+        PongConfig {
             seed,
             script: SCRIPT.to_string(),
             nondeterminism_canary: false,
@@ -229,15 +229,15 @@ pub struct Snapshot {
 }
 
 /// Fields drop in order: the binding, then the scripts, then the world.
-pub struct PongPy {
+pub struct Pong {
     ecs: Ecs,
     _scripts: Vec<Script>,
     ids: Ids,
     world: World,
 }
 
-impl PongPy {
-    pub fn new(config: PongPyConfig) -> Result<Self, String> {
+impl Pong {
+    pub fn new(config: PongConfig) -> Result<Self, String> {
         let world = World::new();
         let native = [
             *world
@@ -279,7 +279,7 @@ impl PongPy {
             wall: look("Wall")?,
             goal_side: look("GoalSide")?,
         };
-        Ok(PongPy {
+        Ok(Pong {
             ecs,
             _scripts: scripts,
             ids,
@@ -344,7 +344,7 @@ impl PongPy {
             .get::<&Position>(|p| *p)
     }
 
-    /// The same deterministic bot as Rust Pong: holds the button that moves
+    /// A deterministic bot: holds the button that moves
     /// `side`'s paddle towards the ball.
     pub fn bot(&self, side: Side) -> TickInput {
         let (paddle, up, down) = match side {
@@ -412,7 +412,7 @@ impl PongPy {
         }
     }
 
-    /// Restores a snapshot taken from a `PongPy` built with the same config.
+    /// Restores a snapshot taken from a `Pong` built with the same config.
     pub fn restore(&mut self, s: &Snapshot) -> Result<(), String> {
         self.ecs.restore(&s.ecs)?;
         self.world.set(Contacts(s.contacts.clone()));
@@ -420,7 +420,7 @@ impl PongPy {
     }
 }
 
-impl Simulation for PongPy {
+impl Simulation for Pong {
     fn step(&mut self, input: TickInput) {
         self.world.set(Input {
             buttons: input.buttons,

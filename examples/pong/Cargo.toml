@@ -1,5 +1,5 @@
 [package]
-name = "pong_py"
+name = "pong"
 description = "Pong written in Python on the Flecs binding, with native collision."
 version.workspace = true
 edition.workspace = true

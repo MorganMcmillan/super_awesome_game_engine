@@ -416,18 +416,6 @@ name = "pong"
 version = "0.0.1"
 dependencies = [
  "flecs_ecs",
- "pyo3",
- "sage_collision",
- "sage_core",
- "sage_platform",
- "sage_script",
-]
-
-[[package]]
-name = "pong_py"
-version = "0.0.1"
-dependencies = [
- "flecs_ecs",
  "sage_collision",
  "sage_core",
  "sage_ecs_py",

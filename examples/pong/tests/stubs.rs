@@ -2,15 +2,15 @@
 //! generated ones) must match what the binding generates from reflection.
 //!
 //! After an intentional change to a native component, regenerate them with
-//! `UPDATE_STUBS=1 cargo test -p pong_py --test stubs`.
+//! `UPDATE_STUBS=1 cargo test -p pong --test stubs`.
 
 use std::path::PathBuf;
 
-use pong_py::{PongPy, PongPyConfig};
+use pong::{Pong, PongConfig};
 
 #[test]
 fn committed_type_stubs_match_the_native_components() {
-    let p = PongPy::new(PongPyConfig::new(1)).unwrap();
+    let p = Pong::new(PongConfig::new(1)).unwrap();
     let dir = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../python/sage");
     let update = std::env::var_os("UPDATE_STUBS").is_some();
     let stubs = p.ecs().type_stubs();
@@ -35,6 +35,6 @@ fn committed_type_stubs_match_the_native_components() {
     assert!(
         stale.is_empty(),
         "stale editor stubs in python/sage: {stale:?}; \
-         regenerate with `UPDATE_STUBS=1 cargo test -p pong_py --test stubs`"
+         regenerate with `UPDATE_STUBS=1 cargo test -p pong --test stubs`"
     );
 }

@@ -9,17 +9,17 @@ A game engine for rapid prototyping with a low skill floor and a high ceiling. G
 - `claude/game-engine-design-doc.md` is the design. Read "How to use this document" and the tag meanings first. The design doc plans to move it to `docs/design.md`; ask Morgan before moving it. Until then the `claude/` copy is authoritative.
 - `claude/design-exercises.md` is design homework for Morgan ("exercise N" in the design doc). Do not attempt it.
 - `docs/milestone-0.md`: acceptance status and the placeholders waiting on Morgan. `docs/spikes/<id>.md`: spike write-ups. `docs/dependencies.md`: pins and licenses.
-- The Python–Flecs binding (`sage_ecs_py`, design doc 3.1 and 5.4, revision 4) and a Python port of Pong (`examples/pong_py`) were added at Morgan's request while Milestone 0 is open.
+- The Python–Flecs binding (`sage_ecs_py`, design doc 3.1 and 5.4, revision 4) and Pong written in Python (`examples/pong`) were added at Morgan's request while Milestone 0 is open.
 - Milestone 0 (design doc 13.1) is implemented: A1–A3 pass (A3 = both candidates, chosen by Morgan); A4 passes locally on Windows and Linux, and the hosted CI run is pending. Section 13.2 lists the non-goals that still apply until Milestone 0 is accepted.
 
 ## Commands
-- Build: `cargo build` · Test: `cargo test --workspace` · One test: `cargo test -p <crate> <name_substring>` (for example `cargo test -p pong a1_canary`)
+- Build: `cargo build` · Test: `cargo test --workspace` · One test: `cargo test -p <crate> <name_substring>` (for example `cargo test -p pong canary`)
 - Release tests (S8 requires debug/release parity): `cargo test --workspace --release`
-- Needs a display (A2 windowed half): `cargo test -p pong --test cli -- --ignored`
+- Needs a display (A2 windowed half): `cargo run -p pong -- smoke`
 - Lint and format (CI uses both): `cargo clippy --workspace --all-targets -- -D warnings`, `cargo fmt --all`
 - Run Pong: `cargo run -p pong -- play` (W/S and Up/Down, Esc quits). Also `headless [--seed N] [--record FILE]`, `replay FILE [--hashes OUT]`, `smoke [--frames N]`.
 - S4 benchmark: `cargo run --release -p spike_pyo3_cost`
-- Python Pong: `cargo run -p pong_py -- play` (same commands as `pong`). Python system cost: `cargo test --release -p sage_ecs_py --test cost -- --ignored --nocapture`
+- Python system cost: `cargo test --release -p sage_ecs_py --test cost -- --ignored --nocapture`
 - The toolchain is pinned to 1.99.1 in `rust-toolchain.toml`. The first build compiles Flecs C and SDL3 from source (about 6 minutes; needs CMake and a C compiler). Python 3.12 must be installed and its DLL/shared library findable at run time.
 
 ## Architecture
@@ -27,10 +27,9 @@ A game engine for rapid prototyping with a low skill floor and a high ceiling. G
 - `crates/sage_collision`: `detect()` (sweep and prune, then the parry cuboid narrow phase; canonical `a < b` output sorted by pair) and `ContactTable` (current and previous sets; begin/stay/end by sorted merge; the previous set is hashed for rewind).
 - `crates/sage_script`: embedded CPython. `init()` starts it once per process through `PyConfig` (isolated, hash seed 0). `Script::load` runs source in fresh globals and discovers `@sage.on(event)` handlers in name order. The `sage` package's `__init__.py` is embedded from `python/sage/` (`PACKAGE_SOURCE`).
 - `crates/sage_ecs_py`: the Python–Flecs binding (design doc 3.1, 5.4). `Ecs::new(&world, seed, module_name)`, then `ecs.load(name, source)` runs a script with a `world` global. Rust half (`sage._ecs`): `registry.rs` (per-world state, view validity), `value.rs` (`Value` base class and `Field` descriptors), `api.rs` (`NativeWorld`, `Entity`), `callbacks.rs` (systems and observers built on the C API with query `expr`), `state.rs` (generic hash, snapshot, restore). Python half (`sage.ecs`): `python/sage/ecs.py` (`@component`, decorators, signature analysis, `World`/`FlecsModule` wrappers). Host-owned native flecs modules are added with `Ecs::add_native_module` and instantiated from Python with `import_native`.
-- `python/sage/`: the whole `sage` Python package as real files, embedded by `include_str!` (`__init__.py` by `sage_script`, `ecs.py` by `sage_ecs_py`). `ecs.pyi` and `_ecs.pyi` are type stubs for editors only; keep them in step with `ecs.py` and the `#[pymethods]` in `api.rs`/`value.rs`. `_native.pyi` and `collision.pyi` are *generated* from Pong's native components; regenerate with `UPDATE_STUBS=1 cargo test -p pong_py --test stubs` after changing one (the test fails when they are stale). `pyrightconfig.json` puts `python/` on the editor's path; `examples/pong_py/scripts/__builtins__.pyi` declares the `world` global.
-- `examples/pong_py`: Pong with every rule in `scripts/pong.py`. The host provides only the reflected native vocabulary (`sage.collision.Position`, `Collider`, `ContactBegin`, `sage.Input`, `sage.Clock`) and the native `collision` flecs module. `tests/game.rs` applies A1, A2 and A3 C2 to it.
+- `python/sage/`: the whole `sage` Python package as real files, embedded by `include_str!` (`__init__.py` by `sage_script`, `ecs.py` by `sage_ecs_py`). `ecs.pyi` and `_ecs.pyi` are type stubs for editors only; keep them in step with `ecs.py` and the `#[pymethods]` in `api.rs`/`value.rs`. `_native.pyi` and `collision.pyi` are *generated* from Pong's native components; regenerate with `UPDATE_STUBS=1 cargo test -p pong --test stubs` after changing one (the test fails when they are stale). `pyrightconfig.json` puts `python/` on the editor's path; `examples/pong/scripts/__builtins__.pyi` declares the `world` global.
+- `examples/pong`: Pong with every rule in `scripts/pong.py`. The host provides only the reflected native vocabulary (`sage.collision.Position`, `Collider`, `ContactBegin`, `sage.Input`, `sage.Clock`) and the native `collision` flecs module. `tests/game.rs` applies A1, A2 and A3 C2 to it.
 - `crates/sage_platform`: presentation. The `Renderer` and `Presentable` traits, `SdlRenderer` (SDL Render API, the throwaway renderer for M0), `InputMap`, and `run_windowed` (a wall-clock accumulator that steps a fixed number of ticks and records input per tick).
-- `examples/pong`: the Milestone 0 game. `src/sim.rs` holds the Flecs world: flecs modules `PongCore` (always on: clock, game-state machine) and `PongPlay` (enabled only while `Playing`: input, movement, `DetectContacts`, and the observers `BounceBall`, `BallHitsSide`, `OnGoal`). Custom phases run SimInput → SimMove → SimDetect → SimReact after OnUpdate. `scripts/rules.py` is the Python scoring rule. `tests/acceptance.rs` and `tests/cli.rs` cover A1 and A2; `tests/a3_candidates.rs` is A3 (both candidates, C1 and C2). `Pong::snapshot`/`restore` must cover everything `state_hash` covers.
 - `spikes/flecs_features`: S1/S2 regression tests for the pinned Flecs. `spikes/pyo3_cost`: the S4 benchmark.
 - Dependency direction: simulation crates (`sage_core`, `sage_collision`, `sage_script`, `sage_ecs_py`) never depend on `sage_platform`. Only the app (`pong`) wires them together.
 
@@ -83,7 +82,7 @@ A game engine for rapid prototyping with a low skill floor and a high ceiling. G
 - The determinism tests (in-process and cross-process replays, per-tick hashes) must always pass, and the canary must always be caught (S3).
 - Add a regression test for every behavior the design doc says to "verify" once you have verified it.
 - Collision output is checked against the brute-force reference and a golden hash under debug and release (S8). Update `GOLDEN` only on intentional changes.
-- If game rules change on purpose, re-record `examples/pong/tests/data/seed7_left_bot.txt` with `pong headless --seed 7 --record ...`.
+- If game rules change on purpose, re-check the replay tests in `examples/pong/tests/game.rs`.
 
 ## Naming and terms
 - See the glossary (design doc section 14). Key points: "pipeline phase" (Flecs `Phase`) is not a "game state" (`GameState`); do not use "stage" (Flecs uses it for command queues); say "flecs module" or "crate", never a bare "module".

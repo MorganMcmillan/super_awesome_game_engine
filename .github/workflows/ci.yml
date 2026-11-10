@@ -64,10 +64,10 @@ jobs:
 
       - name: Windowed smoke (A2)
         if: runner.os == 'Windows'
-        run: cargo test -p pong --test cli -- --ignored
+        run: cargo run -p pong -- smoke
 
       - name: Windowed smoke (A2)
         if: runner.os == 'Linux'
-        run: xvfb-run -a cargo test -p pong --test cli -- --ignored
+        run: xvfb-run -a cargo run -p pong -- smoke
         env:
           LD_LIBRARY_PATH: ${{ env.pythonLocation }}/lib

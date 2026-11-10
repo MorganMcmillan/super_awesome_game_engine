@@ -1,5 +1,5 @@
 // Editor support for game scripts (Pylance and pyright read this file).
-// The sage package lives in python/sage; scripts in examples/pong_py/scripts
+// The sage package lives in python/sage; scripts in examples/pong/scripts
 // get the `world` global from the __builtins__.pyi there.
 {
   "include": ["python", "examples"],
@@ -13,7 +13,7 @@
   "reportMissingModuleSource": "none",
   "extraPaths": ["python"],
   "executionEnvironments": [
-    { "root": "examples/pong_py/scripts", "extraPaths": ["python"] },
+    { "root": "examples/pong/scripts", "extraPaths": ["python"] },
     { "root": ".", "extraPaths": ["python"] }
   ]
 }

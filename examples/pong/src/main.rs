@@ -1,16 +1,16 @@
 //! Pong written in Python (scripts/pong.py).
 //!
 //! ```text
-//! pong_py play     [--seed N] [--record FILE]   windowed; W/S and Up/Down; Esc quits
-//! pong_py headless [--seed N] [--record FILE]   scripted game: left bot vs idle right
-//! pong_py replay   FILE [--hashes OUT]          replay a recording headless
-//! pong_py smoke    [--frames N]                 open a window, draw, check the court
+//! pong play     [--seed N] [--record FILE]   windowed; W/S and Up/Down; Esc quits
+//! pong headless [--seed N] [--record FILE]   scripted game: left bot vs idle right
+//! pong replay   FILE [--hashes OUT]          replay a recording headless
+//! pong smoke    [--frames N]                 open a window, draw, check the court
 //! ```
 //! Exit code is non-zero on any failure, so every command is script-checkable.
 
 use std::process::ExitCode;
 
-use pong_py::{GameState, LEFT_DOWN, LEFT_UP, PongPy, PongPyConfig, RIGHT_DOWN, RIGHT_UP, Side};
+use pong::{GameState, LEFT_DOWN, LEFT_UP, Pong, PongConfig, RIGHT_DOWN, RIGHT_UP, Side};
 use sage_core::host::DrawKind;
 use sage_core::{InputRecording, Simulation, run_recording};
 use sage_platform::{InputMap, Key, Presentable, WindowOptions, run_windowed};
@@ -48,7 +48,7 @@ fn parse() -> Result<Args, String> {
     Ok(a)
 }
 
-struct Shown(PongPy);
+struct Shown(Pong);
 
 impl Simulation for Shown {
     fn step(&mut self, input: sage_core::TickInput) {
@@ -76,7 +76,7 @@ fn input_map() -> InputMap {
         .bind(Key::Down, RIGHT_DOWN)
 }
 
-fn summary(p: &PongPy) -> String {
+fn summary(p: &Pong) -> String {
     let [l, r] = p.points();
     format!(
         "tick={} state={} score={l}:{r} winner={} hash={:#018x}",
@@ -95,7 +95,7 @@ fn run(a: Args) -> Result<(), String> {
     match a.cmd.as_str() {
         "play" | "smoke" => {
             let smoke = a.cmd == "smoke";
-            let mut sim = Shown(PongPy::new(PongPyConfig::new(a.seed))?);
+            let mut sim = Shown(Pong::new(PongConfig::new(a.seed))?);
             let run = run_windowed(
                 &mut sim,
                 a.seed,
@@ -130,7 +130,7 @@ fn run(a: Args) -> Result<(), String> {
             Ok(())
         }
         "headless" => {
-            let mut pong = PongPy::new(PongPyConfig::new(a.seed))?;
+            let mut pong = Pong::new(PongConfig::new(a.seed))?;
             let mut rec = InputRecording::new(a.seed);
             while pong.state() != GameState::GameOver {
                 if pong.tick() > 60 * 60 * 10 {
@@ -150,7 +150,7 @@ fn run(a: Args) -> Result<(), String> {
             let path = a.file.ok_or("replay needs a recording file")?;
             let text = std::fs::read_to_string(&path).map_err(|e| format!("{path}: {e}"))?;
             let rec = InputRecording::from_text(&text).map_err(|e| e.to_string())?;
-            let mut pong = PongPy::new(PongPyConfig::new(rec.seed))?;
+            let mut pong = Pong::new(PongConfig::new(rec.seed))?;
             let trace = run_recording(&mut pong, &rec);
             if let Some(out) = &a.hashes {
                 let mut s = format!("initial {:#018x}\n", trace.initial);
