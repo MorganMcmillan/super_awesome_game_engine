@@ -27,10 +27,13 @@ mod api;
 mod callbacks;
 mod ffi;
 mod registry;
+mod scene;
 mod state;
 mod stubs;
 mod value;
 
+use std::cell::RefCell;
+use std::collections::BTreeMap;
 use std::ffi::CString;
 use std::rc::Rc;
 use std::sync::OnceLock;
@@ -43,6 +46,8 @@ use sage_core::{Rng, StateHasher};
 use sage_script::{Script, ScriptError, describe};
 
 pub use registry::Kind;
+pub use sage_scene::{Policy, StringTable};
+pub use scene::LoadedGame;
 pub use state::{EntitySnapshot, Snapshot, StoredValue};
 
 use api::NativeWorld;
@@ -300,6 +305,60 @@ impl Ecs {
     /// Restores a snapshot from a world that loaded the same scripts.
     pub fn restore(&self, s: &Snapshot) -> Result<(), String> {
         state::restore(&self.reg, s)
+    }
+
+    /// The schema (version, field names and kinds) of every reflected
+    /// component, as scenes and save games record it.
+    pub fn schemas(&self) -> sage_scene::Schemas {
+        scene::schemas(&self.reg)
+    }
+
+    /// Adds schema migrations in the `sage-migrations v1` text form (kits
+    /// ship them with their components). Scripts can also call
+    /// `world.migrations(text)`.
+    pub fn add_migrations(&self, text: &str) -> Result<(), String> {
+        self.reg
+            .migrations
+            .borrow_mut()
+            .add_text(text)
+            .map_err(|e| e.to_string())
+    }
+
+    /// The world's string table, shared with native code that draws or
+    /// edits text (components store only the ids).
+    pub fn strings(&self) -> Rc<RefCell<StringTable>> {
+        self.reg.strings.clone()
+    }
+
+    /// Interns `text` and returns its id (0 for the empty string).
+    pub fn intern(&self, text: &str) -> u64 {
+        self.reg.strings.borrow_mut().intern(text)
+    }
+
+    /// The entities and singletons as a `sage-scene v1` document.
+    pub fn save_scene(&self) -> String {
+        scene::save_scene(&self.reg)
+    }
+
+    /// Replaces the world's entities and singletons with a scene's, after
+    /// migrating it to the current schema. Returns what was migrated and
+    /// any warnings (non-empty only under [`Policy::Lenient`]). Call it
+    /// between ticks.
+    pub fn load_scene(&self, text: &str, policy: Policy) -> Result<Vec<String>, String> {
+        scene::load_scene(&self.reg, text, policy)
+    }
+
+    /// A `sage-save v1` document: the scene plus the RNG, the StableId
+    /// counter, flecs module switches, and the host's `extra` entries (state
+    /// the binding does not know, such as a contact table).
+    pub fn save_game(&self, extra: BTreeMap<String, String>) -> String {
+        scene::save_game(&self.reg, extra)
+    }
+
+    /// Restores a save game into a world that loaded the same scripts.
+    /// Returns the host extras that were saved.
+    pub fn load_game(&self, text: &str, policy: Policy) -> Result<LoadedGame, String> {
+        scene::load_game(&self.reg, text, policy)
     }
 
     /// True if some simulation entity holds an opaque component, which

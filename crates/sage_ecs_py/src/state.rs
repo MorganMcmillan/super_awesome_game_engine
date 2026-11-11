@@ -18,6 +18,7 @@ use std::ffi::c_void;
 
 use flecs_ecs::sys;
 use sage_core::{Rng, StateHasher};
+use sage_scene::StringTable;
 
 use crate::ffi;
 use crate::registry::{FieldInfo, Kind, Layout, Registry};
@@ -47,6 +48,7 @@ pub struct Snapshot {
     pub modules: Vec<(String, bool)>,
     pub next_sid: u64,
     pub rng: Rng,
+    pub strings: StringTable,
 }
 
 /// Built-in Flecs relationships that are simulation state.
@@ -229,6 +231,14 @@ pub fn hash_into(reg: &Registry, h: &mut StateHasher) {
     for s in reg.rng.borrow().state() {
         h.tag("rng").u64(s);
     }
+    // Only when used, so a world without text hashes as it always did.
+    let strings = reg.strings.borrow();
+    if !strings.is_empty() {
+        h.tag("strings");
+        for (id, text) in strings.iter() {
+            h.u64(id).u64(text.len() as u64).bytes(text.as_bytes());
+        }
+    }
 }
 
 fn modules(reg: &Registry) -> Vec<(String, bool)> {
@@ -301,10 +311,11 @@ pub fn snapshot(reg: &Registry) -> Snapshot {
         modules: modules(reg),
         next_sid: reg.next_sid.get(),
         rng: reg.rng.borrow().clone(),
+        strings: reg.strings.borrow().clone(),
     }
 }
 
-fn id_by_path(reg: &Registry) -> BTreeMap<String, u64> {
+pub(crate) fn id_by_path(reg: &Registry) -> BTreeMap<String, u64> {
     reg.types
         .borrow()
         .iter()
@@ -467,6 +478,7 @@ pub fn restore(reg: &Registry, s: &Snapshot) -> Result<(), String> {
     }
     reg.next_sid.set(s.next_sid);
     *reg.rng.borrow_mut() = s.rng.clone();
+    *reg.strings.borrow_mut() = s.strings.clone();
     reg.invalidate_views();
     Ok(())
 }

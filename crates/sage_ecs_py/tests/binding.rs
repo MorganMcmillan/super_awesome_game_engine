@@ -907,3 +907,188 @@ fn prefab_add_remove_has_take_the_same_arguments() {
     assert!(g.eval::<bool>("not base.remove(Tag, (Likes, b)).has(Tag)"));
     assert!(g.eval::<bool>("base.has(Pos)"));
 }
+
+fn run(g: &Game, code: &str) {
+    Python::attach(|py| {
+        let c = std::ffi::CString::new(code).unwrap();
+        py.run(&c, Some(g.script.globals(py)), None)
+            .unwrap_or_else(|e| panic!("{code}: {}", sage_script::describe(py, &e)));
+    });
+}
+
+#[test]
+fn save_game_restores_the_hash_at_every_later_tick() {
+    use std::collections::BTreeMap;
+    let a = Game::new(&src(SIM));
+    run(&a, "label = world.intern('Hello, \"world\"')");
+    for _ in 0..12 {
+        a.tick();
+    }
+    let extra: BTreeMap<String, String> =
+        [("host".to_string(), "contacts\n1 2".to_string())].into();
+    let text = a.ecs.save_game(extra.clone());
+    assert!(text.starts_with("sage-save v1\n"));
+    let at_save = a.hash();
+    let mut later = vec![];
+    for _ in 0..25 {
+        a.tick();
+        later.push(a.hash());
+    }
+    // A fresh world that has run for a different number of ticks.
+    let b = Game::new(&src(SIM));
+    for _ in 0..3 {
+        b.tick();
+    }
+    let loaded = b.ecs.load_game(&text, sage_ecs_py::Policy::Strict).unwrap();
+    assert_eq!(loaded.extra, extra, "host extras come back");
+    assert!(loaded.report.is_empty(), "{:?}", loaded.report);
+    assert_eq!(b.hash(), at_save, "hash right after loading");
+    for (i, want) in later.iter().enumerate() {
+        b.tick();
+        assert_eq!(b.hash(), *want, "tick {} after loading", i + 1);
+    }
+    // Writing is deterministic: saving the loaded world gives the same text.
+    let c = Game::new(&src(SIM));
+    c.ecs.load_game(&text, sage_ecs_py::Policy::Strict).unwrap();
+    assert_eq!(c.ecs.save_game(extra), text);
+}
+
+#[test]
+fn strings_are_saved_and_hashed() {
+    let a = Game::new(&src(SIM));
+    let before = a.hash();
+    run(&a, "label = world.intern('Press start')");
+    assert_ne!(a.hash(), before, "the string table is part of the hash");
+    assert_eq!(a.eval::<String>("world.string(label)"), "Press start");
+    assert_eq!(a.eval::<u64>("world.intern('')"), 0);
+    let text = a.ecs.save_game(Default::default());
+    assert!(text.contains("\"Press start\""), "{text}");
+    let b = Game::new(&src(SIM));
+    b.ecs.load_game(&text, sage_ecs_py::Policy::Strict).unwrap();
+    let id = a.eval::<u64>("label");
+    assert_eq!(
+        b.eval::<String>(&format!("world.string({id})")),
+        "Press start"
+    );
+    assert_eq!(b.hash(), a.hash());
+}
+
+const HERO: &str = r#"
+@component
+class Player:
+    points: sage.u32 = 0
+    lives: sage.u32 = 3
+@component
+class Hero: pass
+"#;
+
+#[test]
+fn a_scene_round_trips_and_can_be_edited_by_hand() {
+    let a = Game::new(&src(HERO));
+    run(&a, "world.entity('hero', 5).set(Player(7, 2)).add(Hero)");
+    run(&a, "world.entity(None, 9).set(Player(1, 1))");
+    let text = a.ecs.save_scene();
+    assert!(text.starts_with("sage-scene v1\nmode 2d\nschema game.Hero 1\nschema game.Player 1 points:u32 lives:u32\n"), "{text}");
+    assert!(
+        text.contains("entity 5 \"hero\"\n  c game.Player points=7 lives=2\n  tag game.Hero\n"),
+        "{text}"
+    );
+    // Loading it elsewhere reproduces the same document.
+    let b = Game::new(&src(HERO));
+    assert!(
+        b.ecs
+            .load_scene(&text, sage_ecs_py::Policy::Strict)
+            .unwrap()
+            .is_empty()
+    );
+    assert_eq!(b.ecs.save_scene(), text);
+    // Edit a value in the text, load it back.
+    let edited = text.replace("points=7", "points=70");
+    b.ecs
+        .load_scene(&edited, sage_ecs_py::Policy::Strict)
+        .unwrap();
+    assert_eq!(b.eval::<u64>("world.lookup(5).get(Player).points"), 70);
+    assert_eq!(b.eval::<String>("world.lookup(5).name"), "hero");
+    // Bad input is an error that says where.
+    let err = b
+        .ecs
+        .load_scene(
+            &text.replace("points=7", "points=x"),
+            sage_ecs_py::Policy::Strict,
+        )
+        .unwrap_err();
+    assert!(err.contains("line ") && err.contains("points"), "{err}");
+    let err = b
+        .ecs
+        .load_scene(
+            &text.replace("game.Hero", "game.Nope"),
+            sage_ecs_py::Policy::Strict,
+        )
+        .unwrap_err();
+    assert!(
+        err.contains("game.Nope") && err.contains("does not define"),
+        "{err}"
+    );
+}
+
+const OLD_SCENE: &str = "sage-scene v1\nmode 2d\nschema game.Hero 1\nschema game.Player 1 score:u32 legacy:u8\n\
+entity 5 \"hero\"\n  c game.Player score=7 legacy=1\n  tag game.Hero\n";
+
+const MIGRATION: &str = "sage-migrations v1\nmigrate game.Player 1\n  rename-field score points\n  drop-field legacy\n  add-field lives u32 3\n";
+
+#[test]
+fn an_old_scene_is_migrated_on_load() {
+    let g = Game::new(&src(HERO));
+    // Without the migration the mismatch is reported, not guessed at.
+    let err = g
+        .ecs
+        .load_scene(OLD_SCENE, sage_ecs_py::Policy::Strict)
+        .unwrap_err();
+    assert!(
+        err.contains("game.Player") && err.contains("the world has no field score"),
+        "{err}"
+    );
+    g.ecs.add_migrations(MIGRATION).unwrap();
+    // The world's schema is now version 2, so the old file needs the steps.
+    assert_eq!(g.ecs.schemas()["game.Player"].version, 2);
+    let report = g
+        .ecs
+        .load_scene(OLD_SCENE, sage_ecs_py::Policy::Strict)
+        .unwrap();
+    assert_eq!(report, vec!["migrated game.Player v1 -> game.Player v2"]);
+    assert_eq!(g.eval::<u64>("world.lookup(5).get(Player).points"), 7);
+    assert_eq!(g.eval::<u64>("world.lookup(5).get(Player).lives"), 3);
+    // New files are written at the new version.
+    let text = g.ecs.save_scene();
+    assert!(
+        text.contains("schema game.Player 2 points:u32 lives:u32"),
+        "{text}"
+    );
+    // Python can register migrations too, and a bad file is a ValueError.
+    let h = Game::new(&src(HERO));
+    run(&h, &format!("world.migrations({MIGRATION:?})"));
+    assert!(
+        h.ecs
+            .load_scene(OLD_SCENE, sage_ecs_py::Policy::Strict)
+            .is_ok()
+    );
+    assert!(h.ecs.add_migrations("nonsense").is_err());
+}
+
+#[test]
+fn the_lenient_policy_repairs_missing_and_extra_fields() {
+    let g = Game::new(&src(HERO));
+    let scene = "sage-scene v1\nmode 2d\nschema game.Player 1 points:u32 extra:u8\nentity 5\n  c game.Player points=4 extra=9\n";
+    assert!(
+        g.ecs
+            .load_scene(scene, sage_ecs_py::Policy::Strict)
+            .is_err()
+    );
+    let warnings = g
+        .ecs
+        .load_scene(scene, sage_ecs_py::Policy::Lenient)
+        .unwrap();
+    assert_eq!(warnings.len(), 2, "{warnings:?}");
+    assert_eq!(g.eval::<u64>("world.lookup(5).get(Player).points"), 4);
+    assert_eq!(g.eval::<u64>("world.lookup(5).get(Player).lives"), 0);
+}

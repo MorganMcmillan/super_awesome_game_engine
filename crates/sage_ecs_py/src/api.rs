@@ -648,6 +648,26 @@ impl NativeWorld {
         Ok(WorldRng { reg: self.reg })
     }
 
+    /// The id of `text` in the world's string table (0 for ""). Components
+    /// store this id; the text is saved with scenes and save games.
+    fn intern(&self, text: &str) -> PyResult<u64> {
+        Ok(self.reg()?.strings.borrow_mut().intern(text))
+    }
+
+    /// The text for an id from `intern`, or None.
+    fn string(&self, id: u64) -> PyResult<Option<String>> {
+        Ok(self.reg()?.strings.borrow().get(id).map(str::to_string))
+    }
+
+    /// Adds schema migrations (the `sage-migrations v1` text form).
+    fn migrations(&self, text: &str) -> PyResult<()> {
+        self.reg()?
+            .migrations
+            .borrow_mut()
+            .add_text(text)
+            .map_err(|e| PyValueError::new_err(e.to_string()))
+    }
+
     fn _path(&self, id: u64) -> PyResult<String> {
         Ok(ffi::path(self.reg()?.world, id))
     }

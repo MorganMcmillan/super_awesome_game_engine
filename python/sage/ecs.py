@@ -568,6 +568,19 @@ class World:
     def lookup_path(self, path):
         return self._native.lookup_path(path)
 
+    def intern(self, text):
+        """The id of `text` in the world's string table (0 for ""). Components
+        store the id; the text is saved with scenes and save games."""
+        return self._native.intern(text)
+
+    def string(self, text_id):
+        """The text for an id from `intern`, or None."""
+        return self._native.string(text_id)
+
+    def migrations(self, text):
+        """Adds schema migrations in the ``sage-migrations v1`` text form."""
+        self._native.migrations(text)
+
     def set(self, value):
         self._native.set(value)
 

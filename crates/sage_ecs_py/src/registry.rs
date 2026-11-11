@@ -9,6 +9,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use flecs_ecs::sys;
 use pyo3::prelude::*;
 use sage_core::Rng;
+use sage_scene::{Migrations, StringTable};
 
 use crate::ffi::{self, RawWorld};
 
@@ -182,6 +183,10 @@ pub struct Registry {
     /// StableId -> entity. Ordered, so iterating it is canonical.
     pub sids: RefCell<BTreeMap<u64, u64>>,
     pub rng: RefCell<Rng>,
+    /// Interned text (labels, names): components store the 64-bit id.
+    pub strings: Rc<RefCell<StringTable>>,
+    /// Schema migrations for scenes and save games.
+    pub migrations: RefCell<Migrations>,
     /// The flecs module the script's components and systems live in.
     pub script_module: Cell<u64>,
     pub native_modules: RefCell<BTreeMap<String, NativeModule>>,
@@ -205,6 +210,8 @@ impl Registry {
             next_sid: Cell::new(1),
             sids: RefCell::new(BTreeMap::new()),
             rng: RefCell::new(Rng::from_seed(seed)),
+            strings: Rc::new(RefCell::new(StringTable::new())),
+            migrations: RefCell::new(Migrations::new()),
             script_module: Cell::new(0),
             native_modules: RefCell::new(BTreeMap::new()),
             world_obj: RefCell::new(None),

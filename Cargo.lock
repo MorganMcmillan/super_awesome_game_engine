@@ -712,6 +712,7 @@ dependencies = [
  "flecs_ecs",
  "pyo3",
  "sage_core",
+ "sage_scene",
  "sage_script",
 ]
 

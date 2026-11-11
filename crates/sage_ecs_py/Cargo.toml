@@ -10,4 +10,5 @@ publish.workspace = true
 flecs_ecs.workspace = true
 pyo3.workspace = true
 sage_core.workspace = true
+sage_scene.workspace = true
 sage_script.workspace = true
