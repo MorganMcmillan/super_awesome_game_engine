@@ -56,6 +56,12 @@ impl Rng {
         self.next_u64() >> 63 == 1
     }
 
+    /// Rebuilds a generator from `state()` (save games). An all-zero state
+    /// never leaves zero, so it is rejected.
+    pub fn from_state(s: [u64; 4]) -> Option<Self> {
+        (s != [0; 4]).then_some(Self { s })
+    }
+
     /// Internal state, for hashing and snapshots.
     pub fn state(&self) -> [u64; 4] {
         self.s
