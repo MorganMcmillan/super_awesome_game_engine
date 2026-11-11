@@ -212,6 +212,10 @@ pub struct Node {
     pub min: f32,
     pub max: f32,
     pub step: f32,
+    /// A modal: while one exists, only its subtree can take keyboard focus.
+    /// (Its `Block` widget or backdrop stops the pointer.) The topmost modal
+    /// in draw order wins.
+    pub modal: bool,
     /// Break the text into lines that fit the node's width.
     pub wrap: bool,
     /// A scroll container: its children are laid out as if it were as large
@@ -265,6 +269,7 @@ impl Default for Node {
             min: 0.0,
             max: 1.0,
             step: 0.0,
+            modal: false,
             wrap: false,
             scroll: false,
             scroll_offset: 0.0,

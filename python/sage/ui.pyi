@@ -84,6 +84,13 @@ class Label(Component):
     def __init__(self, text: u64 = ...) -> None: ...
 
 
+class Modal(Component):
+    """Native component `sage.ui.Modal`."""
+
+    on: u32
+    def __init__(self, on: u32 = ...) -> None: ...
+
+
 class Nav(Component):
     """Native component `sage.ui.Nav`."""
 

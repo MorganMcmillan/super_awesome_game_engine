@@ -201,12 +201,33 @@ fn step_slider(tree: &mut Tree, i: usize, dir: f32) -> bool {
     changed
 }
 
-/// Focusable, enabled nodes in tab order (`tab`, then draw order).
+/// Is `i` the node `root` or inside its subtree?
+fn within(tree: &Tree, i: usize, root: usize) -> bool {
+    let mut at = Some(i);
+    for _ in 0..64 {
+        match at {
+            Some(a) if a == root => return true,
+            Some(a) => at = parent_of(tree, a),
+            None => return false,
+        }
+    }
+    false
+}
+
+/// The topmost modal (last in draw order), if there is one.
+fn topmost_modal(tree: &Tree, order: &[usize]) -> Option<usize> {
+    order.iter().rev().copied().find(|&i| tree.nodes[i].modal)
+}
+
+/// Focusable, enabled nodes in tab order (`tab`, then draw order), limited to
+/// the topmost modal's subtree while there is a modal.
 fn tab_order(tree: &Tree, order: &[usize]) -> Vec<usize> {
+    let modal = topmost_modal(tree, order);
     let mut v: Vec<(i32, usize, usize)> = order
         .iter()
         .enumerate()
         .filter(|&(_, &i)| tree.nodes[i].widget.focusable() && tree.nodes[i].enabled)
+        .filter(|&(_, &i)| modal.is_none_or(|m| within(tree, i, m)))
         .map(|(rank, &i)| (tree.nodes[i].tab, rank, i))
         .collect();
     v.sort();
@@ -253,6 +274,12 @@ pub fn update(tree: &mut Tree, st: &mut UiState, input: &UiInput) -> Vec<UiEvent
         st.active = 0;
     }
     if !usable(tree, st.focus) {
+        st.focus = 0;
+    }
+    // Focus cannot stay outside a modal.
+    if let (Some(m), Some(f)) = (topmost_modal(tree, &order), find(tree, st.focus))
+        && !within(tree, f, m)
+    {
         st.focus = 0;
     }
 
@@ -922,5 +949,48 @@ mod tests {
             st.hot, 1,
             "the button under the meter is hot, not the meter"
         );
+    }
+
+    #[test]
+    fn a_modal_traps_keyboard_focus_in_its_subtree() {
+        let mut t = menu();
+        // A dialog over the menu: a modal block holding one button.
+        t.nodes.push(Node {
+            id: 90,
+            width: Size::Fixed(100.0),
+            height: Size::Fixed(80.0),
+            widget: Widget::Block,
+            modal: true,
+            z: 5,
+            ..Node::default()
+        });
+        t.nodes.push(Node {
+            id: 91,
+            parent: Some(t.nodes.len() - 1),
+            width: Size::Fixed(40.0),
+            height: Size::Fixed(12.0),
+            widget: Widget::Button,
+            ..Node::default()
+        });
+        layout(&mut t, [100.0, 80.0]);
+        let mut st = UiState {
+            focus: 11, // a toggle in the menu behind the dialog
+            ..UiState::default()
+        };
+        let nav = |bits| UiInput {
+            nav: bits,
+            ..UiInput::default()
+        };
+        tick(&mut t, &mut st, &nav(0));
+        assert_eq!(st.focus, 0, "focus outside the modal is dropped");
+        for _ in 0..3 {
+            tick(&mut t, &mut st, &nav(NAV_NEXT));
+            tick(&mut t, &mut st, &nav(0));
+            assert_eq!(st.focus, 91, "the only focusable widget in the modal");
+        }
+        // Without the modal, navigation reaches the menu again.
+        t.nodes[5].modal = false;
+        tick(&mut t, &mut st, &nav(NAV_NEXT));
+        assert_ne!(st.focus, 91);
     }
 }

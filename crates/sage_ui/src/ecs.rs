@@ -101,6 +101,11 @@ ui_component!(
     UiScroll { offset: f32 }
 );
 ui_component!(
+    /// Marks a node as a modal (`on` 1): while one exists, only its subtree
+    /// can take keyboard focus.
+    UiModal { on: u32 }
+);
+ui_component!(
     /// A text input's caret, as a character index.
     UiCaret { pos: u32 }
 );
@@ -198,6 +203,7 @@ fn build(world: &WorldRef, strings: &StringTable, computed: bool) -> (Tree, Vec<
         let slider = e.try_get::<&UiSlider>(|s| *s);
         let scroll = e.try_get::<&UiScroll>(|s| *s);
         let caret = e.try_get::<&UiCaret>(|c| *c);
+        let modal = e.try_get::<&UiModal>(|m| m.on != 0);
         let parent = unsafe { sys::ecs_get_parent(w, entity) };
         let mut n = Node {
             id: sid,
@@ -240,6 +246,7 @@ fn build(world: &WorldRef, strings: &StringTable, computed: bool) -> (Tree, Vec<
         if let Some(c) = caret {
             n.caret = c.pos as usize;
         }
+        n.modal = modal.unwrap_or(false);
         if let Some(w) = widget {
             n.widget = Widget::from_u32(w.kind);
             n.enabled = w.enabled != 0;
@@ -461,6 +468,7 @@ pub fn setup(world: &World, ecs: &Ecs) -> Result<(), String> {
         UiToggle => "sage::ui::Toggle",
         UiScroll => "sage::ui::Scroll",
         UiCaret => "sage::ui::Caret",
+        UiModal => "sage::ui::Modal",
         UiSlider => "sage::ui::Slider",
         UiClicked => "sage::ui::Clicked",
         UiToggled => "sage::ui::Toggled",

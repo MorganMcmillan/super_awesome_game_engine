@@ -82,7 +82,7 @@ impl NavSampler {
                 let fire = *ticks == 0
                     || (repeat
                         && *ticks >= REPEAT_DELAY
-                        && (*ticks - REPEAT_DELAY) % REPEAT_EVERY == 0);
+                        && (*ticks - REPEAT_DELAY).is_multiple_of(REPEAT_EVERY));
                 *ticks += 1;
                 if fire {
                     bits |= bit;
