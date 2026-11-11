@@ -70,8 +70,14 @@ ui_component!(
     UiPaint { fill: u32, border: u32, border_width: f32, accent: u32 }
 );
 ui_component!(
-    /// Text: `text` is an id from `world.intern`.
-    UiLabel { text: u64, color: u32, scale: f32 }
+    /// Text content: `text` is an id from `world.intern`. Per instance.
+    UiLabel { text: u64 }
+);
+ui_component!(
+    /// Text style: `color` is `0xRRGGBBAA`, `scale` multiplies the font
+    /// (0 means 1), `wrap` 1 breaks lines to fit the node's width. Inherited
+    /// from the prefab unless the instance sets its own.
+    UiTextStyle { color: u32, scale: f32, wrap: u32 }
 );
 ui_component!(
     /// Added to the parent's z. Higher draws later and wins the pointer.
@@ -171,6 +177,7 @@ fn build(world: &WorldRef, strings: &StringTable, computed: bool) -> (Tree, Vec<
         let flow = e.try_get::<&UiFlow>(|f| *f);
         let paint = e.try_get::<&UiPaint>(|p| *p);
         let label = e.try_get::<&UiLabel>(|l| *l);
+        let style = e.try_get::<&UiTextStyle>(|t| *t);
         let z = e.try_get::<&UiZIndex>(|z| z.z);
         let abs = e.try_get::<&UiAbsolute>(|a| *a);
         let widget = e.try_get::<&UiWidget>(|w| *w);
@@ -205,8 +212,10 @@ fn build(world: &WorldRef, strings: &StringTable, computed: bool) -> (Tree, Vec<
         if let Some(l) = label {
             text = strings.get(l.text).unwrap_or("").to_string();
             n.text = text.clone();
-            n.text_color = l.color;
-            n.text_scale = if l.scale > 0.0 { l.scale } else { 1.0 };
+        }
+        if let Some(t) = style {
+            n.text_color = t.color;
+            n.text_scale = if t.scale > 0.0 { t.scale } else { 1.0 };
         }
         if let Some(w) = widget {
             n.widget = Widget::from_u32(w.kind);
@@ -312,12 +321,9 @@ fn step(world: &WorldRef, strings: &RefCell<StringTable>) {
                 ..old
             });
         }
-        if let Some(old) = src.label
-            && n.widget == Widget::TextInput
-            && n.text != src.text
-        {
+        if src.label.is_some() && n.widget == Widget::TextInput && n.text != src.text {
             let id = strings.borrow_mut().intern(&n.text);
-            e.set(UiLabel { text: id, ..old });
+            e.set(UiLabel { text: id });
         }
     }
     world.set(UiInteraction {
@@ -408,6 +414,7 @@ pub fn setup(world: &World, ecs: &Ecs) -> Result<(), String> {
         UiFlow => "sage::ui::Flow",
         UiPaint => "sage::ui::Paint",
         UiLabel => "sage::ui::Label",
+        UiTextStyle => "sage::ui::TextStyle",
         UiZIndex => "sage::ui::ZIndex",
         UiAbsolute => "sage::ui::Absolute",
         UiWidget => "sage::ui::Widget",
@@ -425,6 +432,22 @@ pub fn setup(world: &World, ecs: &Ecs) -> Result<(), String> {
         UiScreen => "sage::ui::Screen",
         UiInteraction => "sage::ui::Interaction",
     );
+    // Style groups are inherited: an instance reads its prefab's value until
+    // it sets its own, so editing a style prefab restyles every instance that
+    // has not overridden that group (design doc 5.2 and 9.2). Everything else
+    // (content, widget state, layout results) is copied per instance.
+    macro_rules! inherit {
+        ($($t:ty),*) => {
+            $( unsafe {
+                sys::ecs_add_id(
+                    world.ptr_mut(),
+                    *world.component::<$t>().id(),
+                    ecs_pair(sys::EcsOnInstantiate, sys::EcsInherit),
+                );
+            } )*
+        };
+    }
+    inherit!(UiBox, UiFlow, UiPaint, UiTextStyle);
     world.set(UiPointer::default());
     world.set(UiNav::default());
     world.set(UiTextEntry::default());

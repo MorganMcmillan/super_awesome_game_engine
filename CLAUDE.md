@@ -11,7 +11,7 @@ A game engine for rapid prototyping with a low skill floor and a high ceiling. G
 - `docs/milestone-0.md`: acceptance status and the placeholders waiting on Morgan. `docs/spikes/<id>.md`: spike write-ups. `docs/dependencies.md`: pins and licenses.
 - The Python–Flecs binding (`sage_ecs_py`, design doc 3.1 and 5.4, revision 4) and Pong written in Python (`examples/pong`) were added at Morgan's request while Milestone 0 is open.
 - Milestone 1 (design doc 13.3: GPU sprite renderer, asset pipeline basics, audio, input mapping) was added at Morgan's request while Milestone 0 is open. Status, checks and gaps: `docs/milestone-1.md`. M1's renderer scope is sprites, a pixel-perfect camera and bitmap text; materials, lighting and a shader toolchain are not started.
-- Milestone 2 (design doc 13.3: UI module, scene format with migrations, save games) was added at Morgan's request while Milestone 0 is open. Status, checks, the decisions awaiting Morgan (three new text formats, `ChildOf` for UI) and gaps: `docs/milestone-2.md`.
+- Milestone 2 (design doc 13.3: UI module, scene format with migrations, save games) was added at Morgan's request while Milestone 0 is open. Status, checks, the decisions Morgan confirmed (three new text formats, `ChildOf` for UI) and gaps: `docs/milestone-2.md`.
 - Milestone 0 (design doc 13.1) is implemented: A1–A3 pass (A3 = both candidates, chosen by Morgan); A4 passes (hosted CI on Windows and Linux succeeded at 054a14e). Section 13.2 lists the non-goals that still apply until Milestone 0 is accepted.
 
 ## Commands

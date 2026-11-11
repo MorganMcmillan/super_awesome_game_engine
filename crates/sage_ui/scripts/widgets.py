@@ -16,12 +16,16 @@
 #     def clicked(c: Clicked):
 #         if c.target == play.sid: ...
 #
+# Style groups (Box, Flow, Paint, TextStyle) are inherited from the prefab until
+# an instance sets its own, so editing a style prefab restyles its instances.
+# Passing a style argument gives the instance its own copy of that whole group.
+#
 # Sizes: None fits the content, a number is fixed, `ui.fill(weight)` takes a
 # share of the space left in the parent. Colors are 0xRRGGBBAA.
 
 import sage
 from sage import OnUpdate
-from sage.ui import Absolute, Box, Flow, Label, Paint, Rect, Slider, Toggle, Widget, ZIndex
+from sage.ui import Absolute, Box, Flow, Label, Paint, Rect, Slider, TextStyle, Toggle, Widget, ZIndex
 
 COLUMN, ROW = 0, 1
 START, CENTER, END, STRETCH = 0, 1, 2, 3
@@ -55,8 +59,8 @@ def _padding(p):
 def _update(entity, cls, **fields):
     """Sets fields on a component, adding it first if the entity lacks it."""
     value = entity.get(cls)
-    if value is None:
-        value = cls()
+    # An inherited group comes back as a read-only view of the prefab's value.
+    value = cls() if value is None else value.copy()
     for key, val in fields.items():
         setattr(value, key, val)
     entity.set(value)
@@ -74,7 +78,7 @@ class Ui:
         panel = world.prefab("UiPanel")
         panel.set(Rect()).set(Box()).set(Flow()).set(Paint())
         label = world.prefab("UiLabel", base=panel)
-        label.set(Label(0, 0xFFFFFFFF, 1.0))
+        label.set(Label(0)).set(TextStyle(0xFFFFFFFF, 1.0, 0))
         button = world.prefab("UiButton", base=label)
         button.set(Widget(BUTTON, 1, 0, 0)).set(Paint(0x3A4150FF, 0x00000000, 0.0, 0x6AA9FFFF))
         button.set(Flow(COLUMN, START, START, 0.0, 4.0, 3.0, 4.0, 3.0))
@@ -99,7 +103,7 @@ class Ui:
     def add(self, prefab, parent=None, *, name=None, sid=None, width=None, height=None,
             direction=None, align=None, justify=None, gap=None, padding=None,
             fill=None, border=None, border_width=None, accent=None,
-            text=None, color=None, scale=None, z=None, at=None, enabled=None, tab=None):
+            text=None, color=None, scale=None, wrap=None, z=None, at=None, enabled=None, tab=None):
         """An instance of `prefab` under `parent` with the given style."""
         e = prefab.instantiate(name, sid)
         if parent is not None:
@@ -121,15 +125,11 @@ class Ui:
         paint = {k: v for k, v in (("fill", fill), ("border", border), ("border_width", border_width), ("accent", accent)) if v is not None}
         if paint:
             _update(e, Paint, **paint)
-        label = {}
         if text is not None:
-            label["text"] = self.world.intern(text)
-        if color is not None:
-            label["color"] = color
-        if scale is not None:
-            label["scale"] = float(scale)
-        if label:
-            _update(e, Label, **label)
+            e.set(Label(self.world.intern(text)))
+        style = {k: v for k, v in (("color", color), ("scale", None if scale is None else float(scale)), ("wrap", None if wrap is None else int(wrap))) if v is not None}
+        if style:
+            _update(e, TextStyle, **style)
         if z is not None:
             e.set(ZIndex(z))
         if at is not None:

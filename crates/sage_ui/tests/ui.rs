@@ -318,3 +318,90 @@ fn the_frame_is_plain_draw_data_and_the_module_can_be_paused() {
     ui.tick();
     assert_eq!(ui.take_log(), "[]", "a paused UI emits nothing");
 }
+
+/// A theme as prefabs: `Primary` and `Danger` derive from the kit's button.
+const THEMED: &str = r#"
+import sage
+from sage.ui import Paint, TextStyle, Label
+
+ui = world.ui
+ui.start()
+Primary = world.prefab("Primary", base=ui.Button)
+Primary.set(Paint(0xE8741AFF, 0, 0.0, 0xFFFFFFFF))
+Danger = world.prefab("Danger", base=ui.Button)
+Danger.set(Paint(0xC0392BFF, 0, 0.0, 0xFFFFFFFF)).set(TextStyle(0xFFFFFFFF, 2.0, 0))
+
+root = ui.panel(width=120, height=60, gap=2)
+a = ui.add(Primary, root, text="A", width=40)
+b = ui.add(Primary, root, text="B", width=40)
+c = ui.add(Danger, root, text="C", width=40)
+own = ui.add(Primary, root, text="D", width=40, fill=0x112233FF)
+
+def fill_of(e):
+    return e.get(Paint).fill
+def scale_of(e):
+    return e.get(TextStyle).scale
+"#;
+
+#[test]
+fn editing_a_style_prefab_restyles_its_instances() {
+    let ui = Ui::new(THEMED);
+    ui.tick();
+    let fill = |e: &str| ui.eval::<u32>(&format!("fill_of({e})"));
+    assert_eq!(
+        fill("a"),
+        0xE874_1AFF,
+        "an instance reads its prefab's style"
+    );
+    assert_eq!(fill("c"), 0xC039_2BFF);
+    assert_eq!(
+        ui.eval::<f32>("scale_of(c)"),
+        2.0,
+        "text style is inherited too"
+    );
+    assert_eq!(
+        ui.eval::<f32>("scale_of(a)"),
+        1.0,
+        "Primary inherits the base text style"
+    );
+    // Edit the prefab: instances that did not override the group follow.
+    Python::attach(|py| {
+        py.run(
+            c"Primary.set(Paint(0x2E86ABFF, 0, 0.0, 0xFFFFFFFF))",
+            Some(ui.script.globals(py)),
+            None,
+        )
+        .unwrap();
+    });
+    ui.tick();
+    assert_eq!(fill("a"), 0x2E86_ABFF);
+    assert_eq!(fill("b"), 0x2E86_ABFF);
+    assert_eq!(fill("c"), 0xC039_2BFF, "a different prefab is unaffected");
+    assert_eq!(
+        fill("own"),
+        0x1122_33FF,
+        "an instance that set its own Paint keeps it"
+    );
+    // And what is drawn follows: the first button's fill is the new color.
+    let f = sage_ui::frame(&ui.world, &ui.ecs);
+    let colors: Vec<[u8; 4]> = f
+        .draws
+        .iter()
+        .filter_map(|d| match d {
+            UiDraw::Rect { color, .. } => Some(*color),
+            _ => None,
+        })
+        .collect();
+    assert!(colors.contains(&[0x2E, 0x86, 0xAB, 0xFF]), "{colors:?}");
+    assert!(
+        !colors.contains(&[0xE8, 0x74, 0x1A, 0xFF]),
+        "the old color is gone"
+    );
+    // The hash covers the edit, and a save restores the inherited look.
+    let text = ui.ecs.save_game(Default::default());
+    let other = Ui::new(THEMED);
+    other.ecs.load_game(&text, Policy::Strict).unwrap();
+    other.tick();
+    assert_eq!(other.eval::<u32>("fill_of(a)"), 0x2E86_ABFF);
+    assert_eq!(other.hash(), ui.hash());
+}

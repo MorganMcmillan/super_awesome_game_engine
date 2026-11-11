@@ -74,9 +74,7 @@ class Label(Component):
     """Native component `sage.ui.Label`."""
 
     text: u64
-    color: u32
-    scale: f32
-    def __init__(self, text: u64 = ..., color: u32 = ..., scale: f32 = ...) -> None: ...
+    def __init__(self, text: u64 = ...) -> None: ...
 
 
 class Nav(Component):
@@ -153,6 +151,15 @@ class TextEntry(Component):
 
     ch: u32
     def __init__(self, ch: u32 = ...) -> None: ...
+
+
+class TextStyle(Component):
+    """Native component `sage.ui.TextStyle`."""
+
+    color: u32
+    scale: f32
+    wrap: u32
+    def __init__(self, color: u32 = ..., scale: f32 = ..., wrap: u32 = ...) -> None: ...
 
 
 class Toggle(Component):

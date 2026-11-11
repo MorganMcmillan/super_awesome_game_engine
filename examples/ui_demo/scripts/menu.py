@@ -20,7 +20,7 @@ status = ui.text(panel, "Ready", color=0x6AA9FFFF, name="status")
 
 
 def say(message):
-    status.set(Label(world.intern(message), 0x6AA9FFFF, 1.0))
+    status.set(Label(world.intern(message)))
 
 
 @world.observer(Clicked)

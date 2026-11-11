@@ -6,8 +6,8 @@ M2 was started at Morgan's request (the `/goal` to implement up to M2) while Mil
 
 No external dependency was added: `sage_scene` has none, and `sage_ui` uses `flecs_ecs` and the internal crates.
 
-## Decisions I made that need Morgan's confirmation
-These came up while building. Each is a default I chose; none touches a [Decided] item, but two are file formats and one answers an [Open] item, which the project rules say to ask about.
+## Decisions made during M2
+Confirmed by Morgan on 2026-11-11 (prefab override diffs, item 3, are deferred to later).
 1. **Three new text formats** (design doc 10.4): `sage-scene v1`, `sage-save v1` and `sage-migrations v1`. They are new, not a change to `sage-input v1`. Layout is in `crates/sage_scene/src/text.rs` and `migrate.rs`.
 2. **UI hierarchy uses `ChildOf`** (design doc 9.1, an [Open] item). `Parent` does not exist at the pinned Flecs (spike S1), which was option (c) of the options listed there. Siblings flow in StableId (creation) order. `OrderedChildren` is not used, so a child cannot be reordered in place.
 3. **Scenes store full component values**, not sparse prefab override diffs (10.4 says diffs). Diffs need a defined notion of "unchanged from the prefab", which is a bigger design question than M2.
