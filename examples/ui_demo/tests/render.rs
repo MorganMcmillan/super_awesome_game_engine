@@ -29,7 +29,7 @@ fn a_session_changes_the_widgets_and_the_picture_shows_it() {
         pixel(&img, [mx + mw / 2.0, my + mh / 2.0]),
         [0x6A, 0xA9, 0xFF, 0xFF]
     );
-    // The typed name is in the draw list, with the focus caret.
+    // The typed name is in the draw list (the caret is a bar, not a character).
     let texts: Vec<String> = demo
         .frame()
         .draws
@@ -39,7 +39,7 @@ fn a_session_changes_the_widgets_and_the_picture_shows_it() {
             _ => None,
         })
         .collect();
-    assert!(texts.contains(&"Ada_".to_string()), "{texts:?}");
+    assert!(texts.contains(&"Ada".to_string()), "{texts:?}");
     assert!(texts.contains(&"Music on".to_string()), "{texts:?}");
     // Play is hovered: lighter than its resting fill.
     let [px, py, _, _] = demo.rect("play");
