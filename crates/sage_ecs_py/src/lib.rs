@@ -374,7 +374,8 @@ impl Ecs {
 
     /// Reads one field of a reflected component by name, through reflection
     /// (for hosts reading components defined in Python). Entity fields read
-    /// as the target's StableId.
+    /// as the target's StableId. The value is an `f64`, so integers above
+    /// 2^53 lose bits: use [`Ecs::field_u64`] for ids and hashes.
     pub fn field(&self, entity: u64, component: u64, field: &str) -> Option<f64> {
         let w = self.reg.world;
         if !ffi::alive(w, entity) || !ffi::has(w, entity, component) {
@@ -398,6 +399,31 @@ impl Ecs {
                 Kind::Entity => self.reg.sid_of(*(p as *const u64)).unwrap_or(0) as f64,
             }
         })
+    }
+
+    /// Reads an integer field exactly (`bool`, `u8`, `u32`, `u64`, or an
+    /// entity field as its StableId). `None` for a missing entity,
+    /// component or field, and for signed or floating-point fields.
+    pub fn field_u64(&self, entity: u64, component: u64, field: &str) -> Option<u64> {
+        let w = self.reg.world;
+        if !ffi::alive(w, entity) || !ffi::has(w, entity, component) {
+            return None;
+        }
+        let f = match &self.reg.types.borrow().get(&component)?.layout {
+            registry::Layout::Struct(fields) => fields.iter().find(|f| f.name == field)?.clone(),
+            _ => return None,
+        };
+        let base = unsafe { sys::ecs_get_id(w, entity, component) } as *const u8;
+        let p = unsafe { base.add(f.offset) };
+        unsafe {
+            match f.kind {
+                Kind::Bool | Kind::U8 => Some(*p as u64),
+                Kind::U32 => Some(*(p as *const u32) as u64),
+                Kind::U64 => Some(*(p as *const u64)),
+                Kind::Entity => Some(self.reg.sid_of(*(p as *const u64)).unwrap_or(0)),
+                _ => None,
+            }
+        }
     }
 
     pub fn has(&self, entity: u64, id: u64) -> bool {

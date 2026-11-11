@@ -1,0 +1,17 @@
+[package]
+name = "sage_ui"
+description = "UI module: UI elements are entities; layout, interaction and widget prefabs as a flecs module."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+[dependencies]
+flecs_ecs.workspace = true
+sage_core.workspace = true
+sage_ecs_py.workspace = true
+sage_scene.workspace = true
+
+[dev-dependencies]
+pyo3.workspace = true
+sage_script.workspace = true

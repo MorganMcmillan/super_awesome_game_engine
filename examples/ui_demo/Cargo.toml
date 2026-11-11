@@ -1,0 +1,17 @@
+[package]
+name = "ui_demo"
+description = "A settings menu built from the UI module's widgets in Python, rendered through the sprite path."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+[dependencies]
+flecs_ecs.workspace = true
+pyo3.workspace = true
+sage_assets.workspace = true
+sage_core.workspace = true
+sage_ecs_py.workspace = true
+sage_platform.workspace = true
+sage_script.workspace = true
+sage_ui.workspace = true

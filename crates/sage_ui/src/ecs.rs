@@ -1,0 +1,438 @@
+//! The UI as a flecs module: native components under `sage.ui`, one system,
+//! and the events widgets emit.
+//!
+//! A UI element is an entity with a StableId and a [`UiRect`]. Its authored
+//! components (`Box`, `Flow`, `Paint`, `Label`, `ZIndex`, `Absolute`,
+//! `Widget`, `Toggle`, `Slider`) are written by users and prefabs; the system
+//! writes the computed ones (`Rect`, `Widget.state`, and the values of
+//! toggles, sliders and text inputs). The parent is the `ChildOf` target;
+//! siblings flow in StableId order.
+//!
+//! Input is data in singletons the host sets each tick: [`UiPointer`],
+//! [`UiNav`], [`UiTextEntry`] and [`UiScreen`]. The memory of the interaction
+//! is the [`UiInteraction`] singleton, so it is hashed, snapshotted and saved
+//! like the rest of the world. Events are emitted on the widget's entity
+//! with the widget's StableId in the payload; Python reacts with
+//! `@world.observer(Clicked)`.
+
+use std::cell::RefCell;
+use std::collections::BTreeMap;
+use std::ffi::CString;
+use std::rc::Rc;
+
+use flecs_ecs::prelude::*;
+use flecs_ecs::sys;
+use sage_core::host::UiFrame;
+use sage_ecs_py::{Ecs, StableIdC};
+use sage_scene::StringTable;
+
+use crate::interact::{EventKind, UiInput, UiState, update};
+use crate::layout::{Align, Direction, Justify, Node, Rect, Size, Tree, Widget, layout};
+
+macro_rules! ui_component {
+    ($(#[$m:meta])* $name:ident { $($f:ident : $t:ty),* $(,)? }) => {
+        $(#[$m])*
+        #[derive(Component, Debug, Clone, Copy, PartialEq, Default)]
+        #[repr(C)]
+        #[flecs(meta)]
+        pub struct $name { $(pub $f: $t),* }
+    };
+}
+
+ui_component!(
+    /// Computed layout: the node's rectangle. Having one makes an entity a
+    /// UI node.
+    UiRect { x: f32, y: f32, w: f32, h: f32 }
+);
+ui_component!(
+    /// Authored size per axis: kind 0 auto, 1 fixed, 2 fill (the value is the
+    /// size or the weight).
+    UiBox { width_kind: u32, width: f32, height_kind: u32, height: f32 }
+);
+ui_component!(
+    /// How a node flows its children: direction (0 column, 1 row), cross
+    /// alignment (0 start, 1 center, 2 end, 3 stretch), main justification
+    /// (0 start, 1 center, 2 end, 3 space between), gap and padding.
+    UiFlow {
+        direction: u32,
+        align: u32,
+        justify: u32,
+        gap: f32,
+        pad_left: f32,
+        pad_top: f32,
+        pad_right: f32,
+        pad_bottom: f32,
+    }
+);
+ui_component!(
+    /// Colors as `0xRRGGBBAA`. `accent` colors slider fill, toggle mark and
+    /// focus ring.
+    UiPaint { fill: u32, border: u32, border_width: f32, accent: u32 }
+);
+ui_component!(
+    /// Text: `text` is an id from `world.intern`.
+    UiLabel { text: u64, color: u32, scale: f32 }
+);
+ui_component!(
+    /// Added to the parent's z. Higher draws later and wins the pointer.
+    UiZIndex { z: i32 }
+);
+ui_component!(
+    /// Takes the node out of the flow: an offset from the parent's content
+    /// box.
+    UiAbsolute { x: f32, y: f32 }
+);
+ui_component!(
+    /// What the node does: kind 0 none, 1 button, 2 toggle, 3 slider,
+    /// 4 text input, 5 block. `state` is computed: bit 0 hovered, 1 pressed,
+    /// 2 focused.
+    UiWidget { kind: u32, enabled: u32, tab: i32, state: u32 }
+);
+ui_component!(UiToggle { on: u32 });
+ui_component!(UiSlider {
+    value: f32,
+    min: f32,
+    max: f32,
+    step: f32
+});
+
+ui_component!(UiClicked { target: u64 });
+ui_component!(UiToggled {
+    target: u64,
+    on: u32
+});
+ui_component!(UiChanged {
+    target: u64,
+    value: f32
+});
+ui_component!(UiTextChanged { target: u64 });
+ui_component!(UiSubmitted { target: u64 });
+ui_component!(UiFocused { target: u64 });
+
+ui_component!(
+    /// Input singleton: the pointer, in UI units. `present` 0 means none.
+    UiPointer { x: f32, y: f32, present: u32, down: u32 }
+);
+ui_component!(
+    /// Input singleton: `NAV_*` bits held this tick.
+    UiNav { bits: u32 }
+);
+ui_component!(
+    /// Input singleton: the character typed this tick (0 for none).
+    UiTextEntry { ch: u32 }
+);
+ui_component!(
+    /// The UI's size in UI units.
+    UiScreen { w: f32, h: f32 }
+);
+ui_component!(
+    /// State singleton: what the interaction remembers between ticks.
+    UiInteraction { hot: u64, active: u64, focus: u64, prev_down: u32, prev_nav: u32 }
+);
+
+const STATE_HOVERED: u32 = 1;
+const STATE_PRESSED: u32 = 2;
+const STATE_FOCUSED: u32 = 4;
+
+/// What was read for one node, kept to write back only what changed.
+struct Source {
+    entity: u64,
+    sid: u64,
+    rect: UiRect,
+    widget: Option<UiWidget>,
+    toggle: Option<UiToggle>,
+    slider: Option<UiSlider>,
+    label: Option<UiLabel>,
+    text: String,
+}
+
+fn entity_rows(world: &WorldRef) -> Vec<(u64, u64)> {
+    let mut rows: Vec<(u64, u64)> = vec![];
+    world
+        .new_query::<(&StableIdC, &UiRect)>()
+        .each_entity(|e, (sid, _)| rows.push((sid.value, *e.id())));
+    rows.sort();
+    rows
+}
+
+/// Reads the entities into a tree in StableId order. `computed` keeps the
+/// stored rectangles and interaction flags instead of leaving them for
+/// `layout` and `update` to compute.
+fn build(world: &WorldRef, strings: &StringTable, computed: bool) -> (Tree, Vec<Source>) {
+    let rows = entity_rows(world);
+    let index: BTreeMap<u64, usize> = rows.iter().enumerate().map(|(i, r)| (r.1, i)).collect();
+    let mut tree = Tree::default();
+    let mut sources = vec![];
+    let w = world.ptr_mut();
+    for &(sid, entity) in &rows {
+        let e = world.entity_from_id(entity);
+        let rect = e.try_get::<&UiRect>(|r| *r).unwrap_or_default();
+        let boxed = e.try_get::<&UiBox>(|b| *b);
+        let flow = e.try_get::<&UiFlow>(|f| *f);
+        let paint = e.try_get::<&UiPaint>(|p| *p);
+        let label = e.try_get::<&UiLabel>(|l| *l);
+        let z = e.try_get::<&UiZIndex>(|z| z.z);
+        let abs = e.try_get::<&UiAbsolute>(|a| *a);
+        let widget = e.try_get::<&UiWidget>(|w| *w);
+        let toggle = e.try_get::<&UiToggle>(|t| *t);
+        let slider = e.try_get::<&UiSlider>(|s| *s);
+        let parent = unsafe { sys::ecs_get_parent(w, entity) };
+        let mut n = Node {
+            id: sid,
+            parent: index.get(&parent).copied(),
+            z: z.unwrap_or(0),
+            absolute: abs.map(|a| [a.x, a.y]),
+            ..Node::default()
+        };
+        if let Some(b) = boxed {
+            n.width = Size::from_parts(b.width_kind, b.width);
+            n.height = Size::from_parts(b.height_kind, b.height);
+        }
+        if let Some(f) = flow {
+            n.direction = Direction::from_u32(f.direction);
+            n.align = Align::from_u32(f.align);
+            n.justify = Justify::from_u32(f.justify);
+            n.gap = f.gap;
+            n.padding = [f.pad_left, f.pad_top, f.pad_right, f.pad_bottom];
+        }
+        if let Some(p) = paint {
+            n.fill = p.fill;
+            n.border = p.border;
+            n.border_width = p.border_width;
+            n.accent = p.accent;
+        }
+        let mut text = String::new();
+        if let Some(l) = label {
+            text = strings.get(l.text).unwrap_or("").to_string();
+            n.text = text.clone();
+            n.text_color = l.color;
+            n.text_scale = if l.scale > 0.0 { l.scale } else { 1.0 };
+        }
+        if let Some(w) = widget {
+            n.widget = Widget::from_u32(w.kind);
+            n.enabled = w.enabled != 0;
+            n.tab = w.tab;
+            if computed {
+                n.hovered = w.state & STATE_HOVERED != 0;
+                n.pressed = w.state & STATE_PRESSED != 0;
+                n.focused = w.state & STATE_FOCUSED != 0;
+            }
+        }
+        if let Some(t) = toggle {
+            n.on = t.on != 0;
+        }
+        if let Some(s) = slider {
+            n.value = s.value;
+            n.min = s.min;
+            n.max = s.max;
+            n.step = s.step;
+        }
+        if computed {
+            n.rect = Rect {
+                x: rect.x,
+                y: rect.y,
+                w: rect.w,
+                h: rect.h,
+            };
+        }
+        tree.nodes.push(n);
+        sources.push(Source {
+            entity,
+            sid,
+            rect,
+            widget,
+            toggle,
+            slider,
+            label,
+            text,
+        });
+    }
+    (tree, sources)
+}
+
+/// One tick of the UI: layout, interaction, then write back and emit.
+fn step(world: &WorldRef, strings: &RefCell<StringTable>) {
+    let (mut tree, sources) = build(world, &strings.borrow(), false);
+    let screen = world.get::<&UiScreen>(|s| *s);
+    layout(&mut tree, [screen.w, screen.h]);
+
+    let pointer = world.get::<&UiPointer>(|p| *p);
+    let nav = world.get::<&UiNav>(|n| n.bits);
+    let ch = world
+        .get::<&UiTextEntry>(|t| char::from_u32(t.ch))
+        .filter(|c| *c != '\0');
+    let before = world.get::<&UiInteraction>(|i| *i);
+    let mut state = UiState {
+        hot: before.hot,
+        active: before.active,
+        focus: before.focus,
+        prev_down: before.prev_down != 0,
+        prev_nav: before.prev_nav,
+    };
+    let input = UiInput {
+        pointer: (pointer.present != 0).then_some([pointer.x, pointer.y]),
+        down: pointer.down != 0,
+        nav,
+        ch,
+    };
+    let events = update(&mut tree, &mut state, &input);
+
+    for (src, n) in sources.iter().zip(&tree.nodes) {
+        let e = world.entity_from_id(src.entity);
+        let rect = UiRect {
+            x: n.rect.x,
+            y: n.rect.y,
+            w: n.rect.w,
+            h: n.rect.h,
+        };
+        if rect != src.rect {
+            e.set(rect);
+        }
+        if let Some(old) = src.widget {
+            let state_bits = (n.hovered as u32 * STATE_HOVERED)
+                | (n.pressed as u32 * STATE_PRESSED)
+                | (n.focused as u32 * STATE_FOCUSED);
+            if state_bits != old.state {
+                e.set(UiWidget {
+                    state: state_bits,
+                    ..old
+                });
+            }
+        }
+        if let Some(old) = src.toggle
+            && (old.on != 0) != n.on
+        {
+            e.set(UiToggle { on: n.on as u32 });
+        }
+        if let Some(old) = src.slider
+            && old.value != n.value
+        {
+            e.set(UiSlider {
+                value: n.value,
+                ..old
+            });
+        }
+        if let Some(old) = src.label
+            && n.widget == Widget::TextInput
+            && n.text != src.text
+        {
+            let id = strings.borrow_mut().intern(&n.text);
+            e.set(UiLabel { text: id, ..old });
+        }
+    }
+    world.set(UiInteraction {
+        hot: state.hot,
+        active: state.active,
+        focus: state.focus,
+        prev_down: state.prev_down as u32,
+        prev_nav: state.prev_nav,
+    });
+
+    // Events last, so observers see the updated state.
+    let by_sid: BTreeMap<u64, u64> = sources.iter().map(|s| (s.sid, s.entity)).collect();
+    for ev in events {
+        let Some(&entity) = by_sid.get(&ev.target) else {
+            continue;
+        };
+        let e = world.entity_from_id(entity);
+        let target = ev.target;
+        match ev.kind {
+            EventKind::Clicked => e.emit(&UiClicked { target }),
+            EventKind::Toggled(on) => e.emit(&UiToggled {
+                target,
+                on: on as u32,
+            }),
+            EventKind::Changed(value) => e.emit(&UiChanged { target, value }),
+            EventKind::TextChanged => e.emit(&UiTextChanged { target }),
+            EventKind::Submitted => e.emit(&UiSubmitted { target }),
+            EventKind::Focused => e.emit(&UiFocused { target }),
+        };
+    }
+}
+
+/// The current UI as plain draw data, for presentation. Reads only.
+pub fn frame(world: &World, ecs: &Ecs) -> UiFrame {
+    let screen = world.get::<&UiScreen>(|s| *s);
+    let strings = ecs.strings();
+    let (tree, _) = build(&world.world(), &strings.borrow(), true);
+    crate::draw::draw(&tree, [screen.w, screen.h])
+}
+
+fn install(
+    w: *mut sys::ecs_world_t,
+    phase: u64,
+    parent: u64,
+    strings: Rc<RefCell<StringTable>>,
+) -> Result<u64, String> {
+    let world = unsafe { WorldRef::from_ptr(w) };
+    let named = |parent: u64, name: &str| {
+        let name = CString::new(name).unwrap();
+        let desc = sys::ecs_entity_desc_t {
+            name: name.as_ptr(),
+            parent,
+            sep: c"".as_ptr(),
+            ..Default::default()
+        };
+        unsafe { sys::ecs_entity_init(w, &desc) }
+    };
+    let module = named(parent, "ui");
+    unsafe { sys::ecs_add_id(w, module, sys::EcsModule) };
+    let prev = unsafe { sys::ecs_set_scope(w, module) };
+    // Immediate: it reads and writes many entities in order, and observers
+    // of its events run before the next system sees the state.
+    world
+        .system_named::<(&StableIdC, &UiRect)>("Update")
+        .kind(phase)
+        .immediate(true)
+        .run(move |mut it| {
+            // Drain the iterator: the work is done over the whole world.
+            while it.next() {}
+            step(&it.world(), &strings);
+        });
+    unsafe { sys::ecs_set_scope(w, prev) };
+    Ok(module)
+}
+
+/// Registers the UI vocabulary and the `ui` native flecs module on a world
+/// bound to `ecs`. Scripts then `from sage.ui import Button...` and
+/// instantiate the module with `world.import_native("ui", phase)`.
+pub fn setup(world: &World, ecs: &Ecs) -> Result<(), String> {
+    macro_rules! register {
+        ($($t:ty => $name:literal),* $(,)?) => {
+            $( ecs.register_native(*world.component_named::<$t>($name).id())?; )*
+        };
+    }
+    register!(
+        UiRect => "sage::ui::Rect",
+        UiBox => "sage::ui::Box",
+        UiFlow => "sage::ui::Flow",
+        UiPaint => "sage::ui::Paint",
+        UiLabel => "sage::ui::Label",
+        UiZIndex => "sage::ui::ZIndex",
+        UiAbsolute => "sage::ui::Absolute",
+        UiWidget => "sage::ui::Widget",
+        UiToggle => "sage::ui::Toggle",
+        UiSlider => "sage::ui::Slider",
+        UiClicked => "sage::ui::Clicked",
+        UiToggled => "sage::ui::Toggled",
+        UiChanged => "sage::ui::Changed",
+        UiTextChanged => "sage::ui::TextChanged",
+        UiSubmitted => "sage::ui::Submitted",
+        UiFocused => "sage::ui::Focused",
+        UiPointer => "sage::ui::Pointer",
+        UiNav => "sage::ui::Nav",
+        UiTextEntry => "sage::ui::TextEntry",
+        UiScreen => "sage::ui::Screen",
+        UiInteraction => "sage::ui::Interaction",
+    );
+    world.set(UiPointer::default());
+    world.set(UiNav::default());
+    world.set(UiTextEntry::default());
+    world.set(UiScreen { w: 320.0, h: 180.0 });
+    world.set(UiInteraction::default());
+    let strings = ecs.strings();
+    ecs.add_native_module("ui", move |w, phase, parent| {
+        install(w, phase, parent, strings.clone())
+    });
+    Ok(())
+}

@@ -5,7 +5,7 @@
 //! so the sprite shaders need no uniforms (see `tools/shaderc`).
 
 use sage_assets::{BitmapFont, Image};
-use sage_core::host::{DrawKind, Frame};
+use sage_core::host::{DrawKind, Frame, UiDraw, UiFrame};
 
 /// A texture slot in the renderer. 0 is a 1x1 white texture (solid
 /// rectangles) and 1 is the font atlas; user textures follow.
@@ -255,6 +255,37 @@ pub fn compose(
     let width = font.measure(&line, ts)[0];
     let x = ((viewport[0] - width) / 2.0).floor().max(2.0 * ts);
     batch.text(font, &line, [x, 4.0 * ts], ts, [0.8, 0.8, 0.8, 1.0]);
+    batch
+}
+
+/// Builds the batch for a UI frame: an integer scale (crisp, like the
+/// pixel-perfect camera) that fits `frame.size` in the viewport, centered.
+/// Draw commands keep their order, so later ones cover earlier ones.
+pub fn compose_ui(frame: &UiFrame, viewport: [f32; 2], font: &BitmapFont) -> SpriteBatch {
+    let scale = (viewport[0] / frame.size[0])
+        .min(viewport[1] / frame.size[1])
+        .floor()
+        .max(1.0);
+    let origin = [
+        ((viewport[0] - frame.size[0] * scale) / 2.0).floor(),
+        ((viewport[1] - frame.size[1] * scale) / 2.0).floor(),
+    ];
+    let at = |p: [f32; 2]| [origin[0] + p[0] * scale, origin[1] + p[1] * scale];
+    let rgba = |c: [u8; 4]| c.map(|v| f32::from(v) / 255.0);
+    let mut batch = SpriteBatch::new(viewport);
+    for d in &frame.draws {
+        match d {
+            UiDraw::Rect { pos, size, color } => {
+                batch.solid(at(*pos), [size[0] * scale, size[1] * scale], rgba(*color))
+            }
+            UiDraw::Text {
+                pos,
+                text,
+                scale: s,
+                color,
+            } => batch.text(font, text, at(*pos), scale * s, rgba(*color)),
+        }
+    }
     batch
 }
 
@@ -541,5 +572,61 @@ mod tests {
         // Text is light grey (204): present only in the strip above the court.
         let text = px.iter().filter(|p| p[0] == 204 && p[1] == 204).count();
         assert!(text > 100, "text pixels: {text}");
+    }
+
+    #[test]
+    fn ui_metrics_match_the_builtin_font() {
+        use sage_core::host::{UI_ADVANCE, UI_GLYPH, UI_LINE_HEIGHT};
+        let f = BitmapFont::builtin();
+        assert_eq!(UI_GLYPH, [f.glyph[0] as f32, f.glyph[1] as f32]);
+        assert_eq!(UI_ADVANCE, f.advance as f32);
+        assert_eq!(UI_LINE_HEIGHT, f.line_height as f32);
+    }
+
+    #[test]
+    fn ui_frames_scale_by_whole_numbers_center_and_keep_order() {
+        let frame = UiFrame {
+            size: [40.0, 20.0],
+            draws: vec![
+                UiDraw::Rect {
+                    pos: [0.0, 0.0],
+                    size: [40.0, 20.0],
+                    color: [10, 20, 30, 255],
+                },
+                UiDraw::Rect {
+                    pos: [10.0, 5.0],
+                    size: [10.0, 10.0],
+                    color: [200, 0, 0, 255],
+                },
+                UiDraw::Text {
+                    pos: [1.0, 1.0],
+                    text: "A".into(),
+                    scale: 1.0,
+                    color: [255, 255, 255, 255],
+                },
+            ],
+        };
+        // 100x70 fits the 40x20 UI at scale 2 (the width limits it), centered.
+        let b = compose_ui(&frame, [100.0, 70.0], &BitmapFont::builtin());
+        let px = rasterize(&b, &textures(), [0, 0, 0, 255], [100, 70]);
+        let at = |x: usize, y: usize| px[y * 100 + x];
+        // Origin: ((100 - 80) / 2, (70 - 40) / 2) = (10, 15).
+        assert_eq!(
+            at(9, 14),
+            [0, 0, 0, 255],
+            "outside the UI is the clear color"
+        );
+        assert_eq!(at(10, 15), [10, 20, 30, 255], "the panel's corner");
+        assert_eq!(
+            at(30, 25),
+            [200, 0, 0, 255],
+            "the second rect covers the first"
+        );
+        assert_eq!(at(89, 54), [10, 20, 30, 255], "the panel's far corner");
+        assert_eq!(at(90, 55), [0, 0, 0, 255]);
+        // The glyph is drawn on top, at twice the size: a lit pixel inside
+        // the cell at (1, 1) * 2 + origin.
+        let lit = (0..14).any(|dy| (0..10).any(|dx| at(12 + dx, 17 + dy) == [255, 255, 255, 255]));
+        assert!(lit, "the glyph is visible");
     }
 }

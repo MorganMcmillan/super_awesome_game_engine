@@ -8,8 +8,10 @@ members = [
     "crates/sage_platform",
     "crates/sage_assets",
     "crates/sage_scene",
+    "crates/sage_ui",
     "tools/shaderc",
     "examples/pong",
+    "examples/ui_demo",
     "spikes/flecs_features",
     "spikes/pyo3_cost",
 ]
@@ -21,8 +23,10 @@ default-members = [
     "crates/sage_platform",
     "crates/sage_assets",
     "crates/sage_scene",
+    "crates/sage_ui",
     "tools/shaderc",
     "examples/pong",
+    "examples/ui_demo",
     "spikes/flecs_features",
 ]
 
@@ -52,6 +56,7 @@ sage_ecs_py = { path = "crates/sage_ecs_py" }
 sage_platform = { path = "crates/sage_platform" }
 sage_assets = { path = "crates/sage_assets" }
 sage_scene = { path = "crates/sage_scene" }
+sage_ui = { path = "crates/sage_ui" }
 
 [profile.dev]
 # Flecs's C code and the Python interpreter are slow unoptimized; keep our own
