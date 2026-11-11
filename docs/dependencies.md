@@ -19,3 +19,5 @@ All versions are pinned exactly in the root `Cargo.toml`, and the toolchain is p
 **M1 transitive audit (2026-11-10, `cargo metadata` for `sage_assets`):** `image` pulls in 18 more crates: adler2 (0BSD OR MIT OR Apache-2.0), autocfg, bitflags, cfg-if, crc32fast, fdeflate, flate2, libm (MIT), num-traits, png (all MIT OR Apache-2.0), bytemuck (Zlib OR Apache-2.0 OR MIT), byteorder-lite (Unlicense OR MIT), miniz_oxide (MIT OR Zlib OR Apache-2.0), moxcms and pxfm (BSD-3-Clause OR Apache-2.0), simd-adler32 (MIT), zlib-rs (Zlib). None is copyleft.
 
 No shader compiler is a dependency: `tools/shaderc` has none (design doc 3.1).
+
+**M2 (2026-11-11):** no new external dependency. `sage_scene` has none; `sage_ui` and `examples/ui_demo` use only the dependencies above and the workspace crates.
