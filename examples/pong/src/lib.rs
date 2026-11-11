@@ -15,7 +15,7 @@ use flecs_ecs::sys;
 use sage_collision::{BoxCollider, ContactTable, detect};
 use sage_core::host::{DrawKind, DrawRect, Frame};
 use sage_core::{Simulation, StableId, StateHasher, TICK_DT, TickInput};
-use sage_ecs_py::{Ecs, StableIdC};
+use sage_ecs_py::{Ecs, Policy, StableIdC};
 use sage_script::Script;
 
 pub mod assets;
@@ -427,6 +427,27 @@ impl Pong {
             ecs: self.ecs.snapshot(),
             contacts: self.world.get::<&Contacts>(|c| c.0.clone()),
         }
+    }
+
+    /// A `sage-save v1` document: everything the binding knows plus the
+    /// contact table, which it does not (the previous tick's contacts decide
+    /// what counts as a new begin).
+    pub fn save(&self) -> String {
+        let contacts = self.world.get::<&Contacts>(|c| c.0.to_text());
+        self.ecs
+            .save_game([("contacts".to_string(), contacts)].into())
+    }
+
+    /// Loads a save game into a `Pong` built with the same config. Play
+    /// continues exactly as the saved game would have.
+    pub fn load(&mut self, text: &str) -> Result<(), String> {
+        let loaded = self.ecs.load_game(text, Policy::Strict)?;
+        let contacts = loaded
+            .extra
+            .get("contacts")
+            .ok_or("the save game has no contact table")?;
+        self.world.set(Contacts(ContactTable::from_text(contacts)?));
+        Ok(())
     }
 
     /// Restores a snapshot taken from a `Pong` built with the same config.

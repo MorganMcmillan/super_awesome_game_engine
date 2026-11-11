@@ -114,6 +114,71 @@ impl ContactTable {
         t
     }
 
+    /// The table as text for a save game: one line per contact,
+    /// `prev|now tick a b nx ny depth`, floats as hex bit patterns so the
+    /// round trip is exact.
+    pub fn to_text(&self) -> String {
+        let mut out = String::new();
+        for (name, set) in [("prev", &self.prev), ("now", &self.now)] {
+            for c in set {
+                out.push_str(&format!(
+                    "{name} {} {} {} {:08x} {:08x} {:08x}\n",
+                    c.tick,
+                    c.a.0,
+                    c.b.0,
+                    c.normal[0].to_bits(),
+                    c.normal[1].to_bits(),
+                    c.depth.to_bits()
+                ));
+            }
+        }
+        out
+    }
+
+    /// Reads `to_text`. Rejects lines out of order and sets that are not
+    /// canonical, because a table that is not canonical is a determinism bug.
+    pub fn from_text(text: &str) -> Result<ContactTable, String> {
+        let mut t = ContactTable::new();
+        let mut seen_now = false;
+        for (n, line) in text.lines().enumerate() {
+            let f: Vec<&str> = line.split_whitespace().collect();
+            let bad = |what: &str| format!("contact table line {}: {what}", n + 1);
+            if f.len() != 7 {
+                return Err(bad("expected `prev|now tick a b nx ny depth`"));
+            }
+            let int = |s: &str| s.parse::<u64>().map_err(|_| bad("bad number"));
+            let bits = |s: &str| {
+                u32::from_str_radix(s, 16)
+                    .map(f32::from_bits)
+                    .map_err(|_| bad("bad float bits"))
+            };
+            let c = Contact {
+                tick: int(f[1])?,
+                a: StableId(int(f[2])?),
+                b: StableId(int(f[3])?),
+                normal: [bits(f[4])?, bits(f[5])?],
+                depth: bits(f[6])?,
+            };
+            match f[0] {
+                "prev" if !seen_now => t.prev.push(c),
+                "now" => {
+                    seen_now = true;
+                    t.now.push(c);
+                }
+                "prev" => return Err(bad("`prev` after `now`")),
+                _ => return Err(bad("expected `prev` or `now`")),
+            }
+        }
+        for set in [&t.prev, &t.now] {
+            let ok =
+                set.iter().all(|c| c.a < c.b) && set.windows(2).all(|w| w[0].pair() < w[1].pair());
+            if !ok {
+                return Err("contact table is not canonical (a < b, sorted by pair)".into());
+            }
+        }
+        Ok(t)
+    }
+
     /// Feeds both sets into a world-state hash.
     pub fn hash_into(&self, h: &mut sage_core::StateHasher) {
         for (name, set) in [("contacts.prev", &self.prev), ("contacts.now", &self.now)] {
@@ -212,5 +277,28 @@ mod tests {
     #[should_panic(expected = "not canonical")]
     fn rejects_unordered_pair() {
         ContactTable::new().advance(vec![c(0, 2, 1)]);
+    }
+
+    #[test]
+    fn text_round_trip_is_exact_and_checks_canonical_order() {
+        let mut t = ContactTable::new();
+        let odd = Contact {
+            normal: [0.1, -0.7],
+            depth: f32::from_bits(0x3dcc_cccd),
+            ..c(4, 1, 9)
+        };
+        t.advance(vec![c(3, 1, 2), c(3, 2, 5)]);
+        t.advance(vec![odd, c(4, 2, 5)]);
+        let text = t.to_text();
+        assert_eq!(ContactTable::from_text(&text).unwrap(), t);
+        assert_eq!(ContactTable::from_text("").unwrap(), ContactTable::new());
+        // Not canonical (a >= b, or out of order), or malformed.
+        assert!(ContactTable::from_text("now 1 5 2 3f800000 0 0\n").is_err());
+        assert!(
+            ContactTable::from_text("now 1 2 3 0 0 0\nnow 1 1 2 0 0 0\n").is_err(),
+            "pairs must be sorted"
+        );
+        assert!(ContactTable::from_text("now 1 2 3 0 0\n").is_err());
+        assert!(ContactTable::from_text("now 1 2 3 0 0 0\nprev 1 2 3 0 0 0\n").is_err());
     }
 }
