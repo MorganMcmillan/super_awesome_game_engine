@@ -20,17 +20,21 @@
 # an instance sets its own, so editing a style prefab restyles its instances.
 # Passing a style argument gives the instance its own copy of that whole group.
 #
+# Scroll areas and wrapping text: `ui.scroll(parent, height=80)` scrolls its
+# children; `wrap=True` on text breaks lines to the width the layout gives it
+# (a fixed or filling width, or a stretching parent).
+#
 # Sizes: None fits the content, a number is fixed, `ui.fill(weight)` takes a
 # share of the space left in the parent. Colors are 0xRRGGBBAA.
 
 import sage
 from sage import OnUpdate
-from sage.ui import Absolute, Box, Flow, Label, Paint, Rect, Slider, TextStyle, Toggle, Widget, ZIndex
+from sage.ui import Absolute, Box, Caret, Flow, Label, Paint, Rect, Scroll, Slider, TextStyle, Toggle, Widget, ZIndex
 
 COLUMN, ROW = 0, 1
 START, CENTER, END, STRETCH = 0, 1, 2, 3
 SPACE_BETWEEN = 3
-NONE, BUTTON, TOGGLE, SLIDER, TEXT_INPUT, BLOCK = 0, 1, 2, 3, 4, 5
+NONE, BUTTON, TOGGLE, SLIDER, TEXT_INPUT, BLOCK, METER = 0, 1, 2, 3, 4, 5, 6
 
 
 class Fill:
@@ -90,10 +94,13 @@ class Ui:
         slider.set(Slider(0.0, 0.0, 1.0, 0.0)).set(Box(2, 1.0, 1, 8.0))
         text_input = world.prefab("UiTextInput", base=label)
         text_input.set(Widget(TEXT_INPUT, 1, 0, 0)).set(Paint(0x14171CFF, 0x3A4150FF, 1.0, 0x6AA9FFFF))
-        text_input.set(Flow(COLUMN, START, START, 0.0, 3.0, 3.0, 3.0, 3.0))
+        text_input.set(Flow(COLUMN, START, START, 0.0, 3.0, 3.0, 3.0, 3.0)).set(Caret(0))
+        meter = world.prefab("UiMeter", base=panel)
+        meter.set(Widget(METER, 1, 0, 0)).set(Paint(0x2A2F3AFF, 0x00000000, 0.0, 0x6AA9FFFF))
+        meter.set(Slider(0.0, 0.0, 1.0, 0.0)).set(Box(2, 1.0, 1, 6.0))
         # The prefabs. Extend them like any prefab: world.prefab("Danger", base=ui.Button).
         self.Panel, self.Text, self.Button = panel, label, button
-        self.Toggle, self.Slider, self.TextInput = toggle, slider, text_input
+        self.Toggle, self.Slider, self.TextInput, self.Meter = toggle, slider, text_input, meter
 
     def start(self, phase=OnUpdate):
         """Instantiates the `ui` flecs module: layout and interaction run in
@@ -168,6 +175,20 @@ class Ui:
 
     def text_input(self, parent, text="", **style):
         return self.add(self.TextInput, parent, text=text, **style)
+
+    def meter(self, parent, value=0.0, low=0.0, high=1.0, **style):
+        """A read-only bar (a progress bar). Set its `Slider` value to move it."""
+        e = self.add(self.Meter, parent, **style)
+        e.set(Slider(float(value), float(low), float(high), 0.0))
+        return e
+
+    def scroll(self, parent=None, **style):
+        """A panel whose content scrolls along its flow direction (the wheel,
+        PageUp/PageDown, or tabbing to a hidden widget). Give it a fixed or
+        filling size along that direction, or there is nothing to scroll."""
+        e = self.add(self.Panel, parent, **style)
+        e.set(Scroll(0.0))
+        return e
 
 
 world.ui = Ui(world)

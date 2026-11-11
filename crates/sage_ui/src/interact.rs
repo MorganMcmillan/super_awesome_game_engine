@@ -8,20 +8,20 @@
 //! from the existing `sage-input v1` recording. The pointer is not part of
 //! that format yet (see docs/milestone-2.md).
 
-use crate::layout::{Tree, Widget};
+use sage_core::host::UI_ADVANCE;
 
-pub const NAV_NEXT: u32 = 1 << 0;
-pub const NAV_PREV: u32 = 1 << 1;
-pub const NAV_ACCEPT: u32 = 1 << 2;
-pub const NAV_CANCEL: u32 = 1 << 3;
-pub const NAV_LEFT: u32 = 1 << 4;
-pub const NAV_RIGHT: u32 = 1 << 5;
-pub const NAV_UP: u32 = 1 << 6;
-pub const NAV_DOWN: u32 = 1 << 7;
-pub const NAV_BACKSPACE: u32 = 1 << 8;
+use crate::layout::{Direction, Tree, Widget};
+
+pub use sage_core::host::{
+    NAV_ACCEPT, NAV_BACKSPACE, NAV_CANCEL, NAV_DELETE, NAV_DOWN, NAV_END, NAV_HOME, NAV_LEFT,
+    NAV_NEXT, NAV_PAGE_DOWN, NAV_PAGE_UP, NAV_PREV, NAV_RIGHT, NAV_UP,
+};
 
 /// The longest text a text input accepts, in characters.
 pub const MAX_TEXT: usize = 256;
+
+/// UI units one wheel notch scrolls.
+pub const SCROLL_STEP: f32 = 12.0;
 
 /// What the UI remembers between ticks. Ids are StableIds; 0 is "none".
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -31,6 +31,9 @@ pub struct UiState {
     pub focus: u64,
     pub prev_down: bool,
     pub prev_nav: u32,
+    /// Output of the last `update`: some scroll offset changed, so the tree
+    /// needs another `layout` before it is drawn. Not carried between ticks.
+    pub scrolled: bool,
 }
 
 #[derive(Clone, Debug, Default, PartialEq)]
@@ -43,6 +46,9 @@ pub struct UiInput {
     pub nav: u32,
     /// A character typed this tick.
     pub ch: Option<char>,
+    /// Wheel notches this tick; positive scrolls the content down (towards
+    /// its end).
+    pub wheel: f32,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -71,8 +77,90 @@ fn interactive(w: Widget) -> bool {
 pub fn hit_test(tree: &Tree, order: &[usize], p: [f32; 2]) -> Option<usize> {
     order.iter().rev().copied().find(|&i| {
         let n = &tree.nodes[i];
-        n.widget != Widget::None && n.rect.contains(p)
+        !matches!(n.widget, Widget::None | Widget::Meter)
+            && n.rect.contains(p)
+            && n.clip.is_none_or(|c| c.contains(p))
     })
+}
+
+fn char_len(s: &str) -> usize {
+    s.chars().count()
+}
+
+fn byte_of(s: &str, index: usize) -> usize {
+    s.char_indices().nth(index).map_or(s.len(), |(b, _)| b)
+}
+
+/// The length of a scroll container's visible content area along its flow.
+fn view_len(tree: &Tree, i: usize) -> f32 {
+    let n = &tree.nodes[i];
+    if n.direction == Direction::Row {
+        n.rect.w - n.padding[0] - n.padding[2]
+    } else {
+        n.rect.h - n.padding[1] - n.padding[3]
+    }
+}
+
+/// Scrolls container `i` by `delta` units, clamped; true if it moved.
+fn scroll_by(tree: &mut Tree, i: usize, delta: f32) -> bool {
+    let max = (tree.nodes[i].content - view_len(tree, i)).max(0.0);
+    let n = &mut tree.nodes[i];
+    let next = (n.scroll_offset + delta).clamp(0.0, max);
+    let moved = next != n.scroll_offset;
+    n.scroll_offset = next;
+    moved
+}
+
+fn parent_of(tree: &Tree, i: usize) -> Option<usize> {
+    tree.nodes[i]
+        .parent
+        .filter(|&p| p < tree.nodes.len() && p != i)
+}
+
+/// The nearest scrolling ancestor of `i`, not counting `i`.
+fn scroll_ancestor(tree: &Tree, i: usize) -> Option<usize> {
+    let mut at = parent_of(tree, i);
+    for _ in 0..64 {
+        let a = at?;
+        if tree.nodes[a].scroll {
+            return Some(a);
+        }
+        at = parent_of(tree, a);
+    }
+    None
+}
+
+/// Scrolls every container above `i` just far enough to show it.
+fn reveal(tree: &mut Tree, i: usize) -> bool {
+    let mut moved = false;
+    let mut at = scroll_ancestor(tree, i);
+    for _ in 0..64 {
+        let Some(a) = at else { break };
+        let c = tree.nodes[a].clone();
+        let n = tree.nodes[i].rect;
+        let (n0, n1, c0, c1) = if c.direction == Direction::Row {
+            (
+                n.x,
+                n.x + n.w,
+                c.rect.x + c.padding[0],
+                c.rect.x + c.rect.w - c.padding[2],
+            )
+        } else {
+            (
+                n.y,
+                n.y + n.h,
+                c.rect.y + c.padding[1],
+                c.rect.y + c.rect.h - c.padding[3],
+            )
+        };
+        if n0 < c0 {
+            moved |= scroll_by(tree, a, n0 - c0);
+        } else if n1 > c1 {
+            moved |= scroll_by(tree, a, n1 - c1);
+        }
+        at = scroll_ancestor(tree, a);
+    }
+    moved
 }
 
 fn find(tree: &Tree, id: u64) -> Option<usize> {
@@ -154,6 +242,8 @@ fn activate(tree: &mut Tree, i: usize, events: &mut Vec<UiEvent>) {
 pub fn update(tree: &mut Tree, st: &mut UiState, input: &UiInput) -> Vec<UiEvent> {
     let mut events = vec![];
     let order = tree.draw_order();
+    st.scrolled = false;
+    let focus_before = st.focus;
 
     // Forget ids that no longer exist or can no longer be used.
     let usable = |tree: &Tree, id: u64| {
@@ -176,6 +266,13 @@ pub fn update(tree: &mut Tree, st: &mut UiState, input: &UiInput) -> Vec<UiEvent
         match target {
             Some(i) => {
                 st.active = tree.nodes[i].id;
+                if tree.nodes[i].widget == Widget::TextInput
+                    && let Some(p) = input.pointer
+                {
+                    let n = &mut tree.nodes[i];
+                    let col = (p[0] - (n.rect.x + n.padding[0])) / (UI_ADVANCE * n.text_scale);
+                    n.caret = (col.round().max(0.0) as usize).min(char_len(&n.text));
+                }
                 if tree.nodes[i].widget.focusable() && st.focus != st.active {
                     st.focus = st.active;
                     events.push(UiEvent {
@@ -205,6 +302,33 @@ pub fn update(tree: &mut Tree, st: &mut UiState, input: &UiInput) -> Vec<UiEvent
             activate(tree, i, &mut events);
         }
         st.active = 0;
+    }
+
+    // The wheel scrolls the topmost scroll container under the pointer.
+    let container_under = |tree: &Tree| {
+        input.pointer.and_then(|p| {
+            order.iter().rev().copied().find(|&i| {
+                let n = &tree.nodes[i];
+                n.scroll && n.rect.contains(p) && n.clip.is_none_or(|c| c.contains(p))
+            })
+        })
+    };
+    if input.wheel != 0.0
+        && let Some(i) = container_under(tree)
+    {
+        st.scrolled |= scroll_by(tree, i, input.wheel * SCROLL_STEP);
+    }
+    let page = (input.nav & !st.prev_nav) & (NAV_PAGE_UP | NAV_PAGE_DOWN);
+    if page != 0 {
+        let target = find(tree, st.focus)
+            .and_then(|f| scroll_ancestor(tree, f))
+            .or_else(|| container_under(tree))
+            .or_else(|| order.iter().copied().find(|&i| tree.nodes[i].scroll));
+        if let Some(i) = target {
+            let step = view_len(tree, i) * 0.9;
+            let dir = if page & NAV_PAGE_DOWN != 0 { 1.0 } else { -1.0 };
+            st.scrolled |= scroll_by(tree, i, dir * step);
+        }
     }
 
     // Navigation acts on the edge of a bit (pressed this tick, not held).
@@ -250,15 +374,40 @@ pub fn update(tree: &mut Tree, st: &mut UiState, input: &UiInput) -> Vec<UiEvent
             }
         }
         if tree.nodes[i].widget == Widget::TextInput {
+            let n = &mut tree.nodes[i];
+            let len = char_len(&n.text);
+            n.caret = n.caret.min(len);
+            if edge & NAV_LEFT != 0 && n.caret > 0 {
+                n.caret -= 1;
+            }
+            if edge & NAV_RIGHT != 0 && n.caret < len {
+                n.caret += 1;
+            }
+            if edge & NAV_HOME != 0 {
+                n.caret = 0;
+            }
+            if edge & NAV_END != 0 {
+                n.caret = len;
+            }
             let mut changed = false;
-            if edge & NAV_BACKSPACE != 0 {
-                changed |= tree.nodes[i].text.pop().is_some();
+            if edge & NAV_BACKSPACE != 0 && n.caret > 0 {
+                let at = byte_of(&n.text, n.caret - 1);
+                n.text.remove(at);
+                n.caret -= 1;
+                changed = true;
+            }
+            if edge & NAV_DELETE != 0 && n.caret < char_len(&n.text) {
+                let at = byte_of(&n.text, n.caret);
+                n.text.remove(at);
+                changed = true;
             }
             if let Some(c) = input.ch
                 && !c.is_control()
-                && tree.nodes[i].text.chars().count() < MAX_TEXT
+                && char_len(&n.text) < MAX_TEXT
             {
-                tree.nodes[i].text.push(c);
+                let at = byte_of(&n.text, n.caret);
+                n.text.insert(at, c);
+                n.caret += 1;
                 changed = true;
             }
             if changed {
@@ -271,6 +420,12 @@ pub fn update(tree: &mut Tree, st: &mut UiState, input: &UiInput) -> Vec<UiEvent
     }
     if edge & NAV_CANCEL != 0 {
         st.focus = 0;
+    }
+    // A widget focused by navigation scrolls into view.
+    if st.focus != focus_before
+        && let Some(i) = find(tree, st.focus)
+    {
+        st.scrolled |= reveal(tree, i);
     }
 
     st.prev_down = input.down;
@@ -552,8 +707,220 @@ mod tests {
             focus: 4242,
             prev_down: false,
             prev_nav: 0,
+            scrolled: false,
         };
         update(&mut t, &mut st, &UiInput::default());
         assert_eq!((st.active, st.focus), (0, 0));
+    }
+
+    /// A 100x40 scroll column holding six 20-unit buttons (120 tall).
+    fn list() -> Tree {
+        let mut nodes = vec![Node {
+            id: 1,
+            width: Size::Fixed(100.0),
+            height: Size::Fixed(40.0),
+            scroll: true,
+            ..Node::default()
+        }];
+        for k in 0..6u64 {
+            nodes.push(Node {
+                id: 10 + k,
+                parent: Some(0),
+                width: Size::Fill(1.0),
+                height: Size::Fixed(20.0),
+                widget: Widget::Button,
+                ..Node::default()
+            });
+        }
+        let mut t = Tree { nodes };
+        layout(&mut t, [100.0, 100.0]);
+        t
+    }
+
+    /// Runs one tick the way the ECS module does: update, then layout again
+    /// if something scrolled.
+    fn tick(t: &mut Tree, st: &mut UiState, input: &UiInput) -> Vec<UiEvent> {
+        let e = update(t, st, input);
+        if st.scrolled {
+            layout(t, [100.0, 100.0]);
+        }
+        e
+    }
+
+    #[test]
+    fn the_wheel_scrolls_the_container_under_the_pointer_and_clamps() {
+        let mut t = list();
+        let mut st = UiState::default();
+        assert_eq!((t.nodes[0].content, t.nodes[0].scroll_offset), (120.0, 0.0));
+        let wheel = |dy, x, y| UiInput {
+            pointer: Some([x, y]),
+            wheel: dy,
+            ..UiInput::default()
+        };
+        tick(&mut t, &mut st, &wheel(1.0, 5.0, 5.0));
+        assert_eq!(t.nodes[0].scroll_offset, SCROLL_STEP);
+        assert_eq!(t.nodes[1].rect.y, -SCROLL_STEP, "content moved up");
+        // Off the container the wheel does nothing.
+        tick(&mut t, &mut st, &wheel(1.0, 5.0, 90.0));
+        assert_eq!(t.nodes[0].scroll_offset, SCROLL_STEP);
+        for _ in 0..20 {
+            tick(&mut t, &mut st, &wheel(1.0, 5.0, 5.0));
+        }
+        assert_eq!(t.nodes[0].scroll_offset, 80.0, "clamped to content - view");
+        tick(&mut t, &mut st, &wheel(-20.0, 5.0, 5.0));
+        assert_eq!(t.nodes[0].scroll_offset, 0.0);
+    }
+
+    #[test]
+    fn clipped_content_cannot_be_hit_and_a_click_lands_on_the_visible_row() {
+        let mut t = list();
+        let mut st = UiState::default();
+        // The sixth button is at y 100..120, far below the 40-unit view.
+        let below = UiInput {
+            pointer: Some([5.0, 100.0]),
+            ..UiInput::default()
+        };
+        tick(&mut t, &mut st, &below);
+        assert_eq!(st.hot, 0, "outside the container: nothing is hit");
+        // A pointer inside the view but over a clipped-out part of the tree
+        // cannot reach it either: scroll so the second row is at y 0..20.
+        t.nodes[0].scroll_offset = 20.0;
+        layout(&mut t, [100.0, 100.0]);
+        tick(
+            &mut t,
+            &mut st,
+            &UiInput {
+                pointer: Some([5.0, 5.0]),
+                ..UiInput::default()
+            },
+        );
+        assert_eq!(st.hot, 11, "the second button is now at the top");
+    }
+
+    #[test]
+    fn navigating_to_a_hidden_widget_scrolls_it_into_view() {
+        let mut t = list();
+        let mut st = UiState::default();
+        let nav = |bits| UiInput {
+            nav: bits,
+            ..UiInput::default()
+        };
+        let mut seen = vec![];
+        for _ in 0..6 {
+            tick(&mut t, &mut st, &nav(NAV_NEXT));
+            tick(&mut t, &mut st, &nav(0));
+            let n = &t.nodes[t.nodes.iter().position(|n| n.id == st.focus).unwrap()];
+            seen.push((st.focus, n.rect.y >= 0.0 && n.rect.y + n.rect.h <= 40.0));
+        }
+        assert!(seen.iter().all(|&(_, visible)| visible), "{seen:?}");
+        assert_eq!(st.focus, 15);
+        assert_eq!(t.nodes[0].scroll_offset, 80.0);
+        // Wrapping back to the first scrolls back up.
+        tick(&mut t, &mut st, &nav(NAV_NEXT));
+        assert_eq!((st.focus, t.nodes[0].scroll_offset), (10, 0.0));
+    }
+
+    #[test]
+    fn page_keys_scroll_by_most_of_a_view() {
+        let mut t = list();
+        let mut st = UiState::default();
+        let nav = |bits| UiInput {
+            nav: bits,
+            ..UiInput::default()
+        };
+        tick(&mut t, &mut st, &nav(NAV_PAGE_DOWN));
+        assert_eq!(t.nodes[0].scroll_offset, 36.0, "90% of the 40-unit view");
+        tick(&mut t, &mut st, &nav(0));
+        tick(&mut t, &mut st, &nav(NAV_PAGE_UP));
+        assert_eq!(t.nodes[0].scroll_offset, 0.0);
+    }
+
+    #[test]
+    fn the_caret_moves_inserts_and_deletes_in_the_middle() {
+        let mut t = Tree {
+            nodes: vec![Node {
+                id: 7,
+                width: Size::Fixed(120.0),
+                height: Size::Fixed(12.0),
+                padding: [3.0, 2.0, 3.0, 2.0],
+                widget: Widget::TextInput,
+                text: "héllo".into(),
+                ..Node::default()
+            }],
+        };
+        layout(&mut t, [120.0, 12.0]);
+        let mut st = UiState::default();
+        // Clicking places the caret: x = 3 + 6 * 2 puts it after two glyphs.
+        tick(&mut t, &mut st, &pointer(3.0 + 6.0 * 2.0 + 1.0, 5.0, true));
+        tick(&mut t, &mut st, &pointer(3.0 + 6.0 * 2.0 + 1.0, 5.0, false));
+        assert_eq!(t.nodes[0].caret, 2);
+        let press = |t: &mut Tree, st: &mut UiState, bits: u32, ch: Option<char>| {
+            let e = tick(
+                t,
+                st,
+                &UiInput {
+                    nav: bits,
+                    ch,
+                    ..UiInput::default()
+                },
+            );
+            tick(t, st, &UiInput::default());
+            e
+        };
+        press(&mut t, &mut st, 0, Some('X'));
+        assert_eq!((t.nodes[0].text.as_str(), t.nodes[0].caret), ("héXllo", 3));
+        press(&mut t, &mut st, NAV_BACKSPACE, None);
+        assert_eq!((t.nodes[0].text.as_str(), t.nodes[0].caret), ("héllo", 2));
+        press(&mut t, &mut st, NAV_BACKSPACE, None);
+        assert_eq!(
+            (t.nodes[0].text.as_str(), t.nodes[0].caret),
+            ("hllo", 1),
+            "multi-byte characters delete whole"
+        );
+        press(&mut t, &mut st, NAV_DELETE, None);
+        assert_eq!((t.nodes[0].text.as_str(), t.nodes[0].caret), ("hlo", 1));
+        press(&mut t, &mut st, NAV_END, None);
+        assert_eq!(t.nodes[0].caret, 3);
+        press(&mut t, &mut st, NAV_RIGHT, None);
+        assert_eq!(t.nodes[0].caret, 3, "the caret stops at the end");
+        press(&mut t, &mut st, NAV_HOME, None);
+        press(&mut t, &mut st, NAV_LEFT, None);
+        assert_eq!(t.nodes[0].caret, 0);
+        let e = press(&mut t, &mut st, NAV_BACKSPACE, None);
+        assert!(e.is_empty(), "nothing to delete before the first character");
+        press(&mut t, &mut st, 0, Some('>'));
+        assert_eq!(t.nodes[0].text, ">hlo");
+    }
+
+    #[test]
+    fn a_meter_is_transparent_to_the_pointer_and_takes_no_focus() {
+        let mut t = Tree {
+            nodes: vec![
+                Node {
+                    id: 1,
+                    width: Size::Fixed(50.0),
+                    height: Size::Fixed(10.0),
+                    widget: Widget::Button,
+                    ..Node::default()
+                },
+                Node {
+                    id: 2,
+                    parent: Some(0),
+                    width: Size::Fill(1.0),
+                    height: Size::Fill(1.0),
+                    widget: Widget::Meter,
+                    ..Node::default()
+                },
+            ],
+        };
+        layout(&mut t, [50.0, 10.0]);
+        let mut st = UiState::default();
+        tick(&mut t, &mut st, &pointer(5.0, 5.0, true));
+        let e = tick(&mut t, &mut st, &pointer(5.0, 5.0, false));
+        assert_eq!(e.iter().filter(|e| e.kind == EventKind::Clicked).count(), 1);
+        assert_eq!(
+            st.hot, 1,
+            "the button under the meter is hot, not the meter"
+        );
     }
 }

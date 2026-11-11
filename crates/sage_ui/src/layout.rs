@@ -115,6 +115,9 @@ pub enum Widget {
     /// Absorbs the pointer without doing anything: a modal backdrop or a
     /// panel that must not click through.
     Block,
+    /// A read-only bar showing a value from its `Slider` component (a
+    /// progress bar). The pointer passes through it and it takes no focus.
+    Meter,
 }
 
 impl Widget {
@@ -125,6 +128,7 @@ impl Widget {
             3 => Widget::Slider,
             4 => Widget::TextInput,
             5 => Widget::Block,
+            6 => Widget::Meter,
             _ => Widget::None,
         }
     }
@@ -146,6 +150,20 @@ pub struct Rect {
 }
 
 impl Rect {
+    /// The overlap of two rectangles (zero-sized when they do not overlap).
+    pub fn intersect(&self, o: &Rect) -> Rect {
+        let x0 = self.x.max(o.x);
+        let y0 = self.y.max(o.y);
+        let x1 = (self.x + self.w).min(o.x + o.w);
+        let y1 = (self.y + self.h).min(o.y + o.h);
+        Rect {
+            x: x0,
+            y: y0,
+            w: (x1 - x0).max(0.0),
+            h: (y1 - y0).max(0.0),
+        }
+    }
+
     pub fn contains(&self, p: [f32; 2]) -> bool {
         p[0] >= self.x && p[0] < self.x + self.w && p[1] >= self.y && p[1] < self.y + self.h
     }
@@ -194,12 +212,28 @@ pub struct Node {
     pub min: f32,
     pub max: f32,
     pub step: f32,
+    /// Break the text into lines that fit the node's width.
+    pub wrap: bool,
+    /// A scroll container: its children are laid out as if it were as large
+    /// as they need, shifted by `scroll_offset` along the flow direction, and
+    /// cut off at its rectangle.
+    pub scroll: bool,
+    pub scroll_offset: f32,
+    /// Text input: the caret as a character index.
+    pub caret: usize,
     /// Set by interaction, read by drawing.
     pub hovered: bool,
     pub pressed: bool,
     pub focused: bool,
     /// Computed by [`layout`].
     pub rect: Rect,
+    /// The text as drawn: `text` broken into lines when `wrap` is set.
+    pub lines: String,
+    /// The size of a scroll container's content along its flow direction.
+    pub content: f32,
+    /// Where this node is visible: the rectangles of its scrolling
+    /// ancestors, intersected. `None` means unclipped.
+    pub clip: Option<Rect>,
 }
 
 impl Default for Node {
@@ -231,10 +265,17 @@ impl Default for Node {
             min: 0.0,
             max: 1.0,
             step: 0.0,
+            wrap: false,
+            scroll: false,
+            scroll_offset: 0.0,
+            caret: 0,
             hovered: false,
             pressed: false,
             focused: false,
             rect: Rect::default(),
+            lines: String::new(),
+            content: 0.0,
+            clip: None,
         }
     }
 }
@@ -323,6 +364,52 @@ pub fn text_size(text: &str, scale: f32) -> [f32; 2] {
     [w, h]
 }
 
+/// How many characters fit in `width` at `scale`.
+pub fn chars_per_line(width: f32, scale: f32) -> usize {
+    let cols = ((width / scale - UI_GLYPH[0]) / UI_ADVANCE).floor() + 1.0;
+    if cols.is_finite() && cols >= 1.0 {
+        cols as usize
+    } else {
+        1
+    }
+}
+
+/// Breaks `text` into lines of at most `width` units at `scale`: at spaces
+/// when it can, in the middle of a word when a word is longer than a line.
+/// Existing `\n` stay. Runs of spaces collapse only where a line breaks.
+pub fn wrap_text(text: &str, scale: f32, width: f32) -> String {
+    let max = chars_per_line(width, scale);
+    let mut out: Vec<String> = vec![];
+    for para in text.split('\n') {
+        let mut line = String::new();
+        let mut len = 0usize;
+        for word in para.split(' ') {
+            let mut word: Vec<char> = word.chars().collect();
+            // Break a word longer than a line.
+            while word.len() > max {
+                if len > 0 {
+                    out.push(std::mem::take(&mut line));
+                    len = 0;
+                }
+                out.push(word.drain(..max).collect());
+            }
+            let need = word.len() + usize::from(len > 0);
+            if len > 0 && len + need > max {
+                out.push(std::mem::take(&mut line));
+                len = 0;
+            }
+            if len > 0 {
+                line.push(' ');
+                len += 1;
+            }
+            line.extend(word.iter());
+            len += word.len();
+        }
+        out.push(line);
+    }
+    out.join("\n")
+}
+
 fn spec(n: &Node, axis: usize) -> Size {
     if axis == 0 { n.width } else { n.height }
 }
@@ -331,6 +418,10 @@ struct Pass<'a> {
     tree: &'a mut Tree,
     kids: Vec<Vec<usize>>,
     intrinsic: Vec<[f32; 2]>,
+    /// Content width each wrapping node got on the previous pass.
+    hints: Vec<Option<f32>>,
+    /// Content width each wrapping node gets on this pass.
+    next: Vec<Option<f32>>,
 }
 
 impl Pass<'_> {
@@ -366,14 +457,18 @@ impl Pass<'_> {
         let mut content = [0.0; 2];
         content[m] = main;
         content[c] = cross;
-        let text = text_size(&n.text, n.text_scale);
+        let shown = match (n.wrap, self.hints[i]) {
+            (true, Some(width)) => wrap_text(&n.text, n.text_scale, width),
+            _ => n.text.clone(),
+        };
+        let text = text_size(&shown, n.text_scale);
         let w = content[0].max(text[0]) + n.padding[0] + n.padding[2];
         let h = content[1].max(text[1]) + n.padding[1] + n.padding[3];
         self.intrinsic[i] = [w, h];
         [w, h]
     }
 
-    fn arrange(&mut self, i: usize, r: Rect, depth: usize) {
+    fn arrange(&mut self, i: usize, r: Rect, clip: Option<Rect>, depth: usize) {
         if depth > MAX_DEPTH {
             return;
         }
@@ -386,7 +481,13 @@ impl Pass<'_> {
             h: (y1 - y0).max(0.0),
         };
         self.tree.nodes[i].rect = rect;
+        self.tree.nodes[i].clip = clip;
         let n = self.tree.nodes[i].clone();
+        let child_clip = if n.scroll {
+            Some(clip.map_or(rect, |c| c.intersect(&rect)))
+        } else {
+            clip
+        };
         let content = Rect {
             x: rect.x + n.padding[0],
             y: rect.y + n.padding[1],
@@ -394,9 +495,24 @@ impl Pass<'_> {
             h: (rect.h - n.padding[1] - n.padding[3]).max(0.0),
         };
         let origin = [content.x, content.y];
-        let extent = [content.w, content.h];
+        let mut extent = [content.w, content.h];
         let m = if n.direction == Direction::Row { 0 } else { 1 };
         let c = 1 - m;
+        if n.wrap {
+            self.next[i] = Some(content.w);
+        }
+        // A scroll container lays its children out in as much room as they
+        // need along the flow, then shifts them by the clamped offset.
+        let mut scroll = 0.0;
+        if n.scroll {
+            let pad_main = n.padding[m] + n.padding[2 + m];
+            let need = (self.intrinsic[i][m] - pad_main).max(0.0);
+            scroll = n.scroll_offset.clamp(0.0, (need - extent[m]).max(0.0));
+            let node = &mut self.tree.nodes[i];
+            node.scroll_offset = scroll;
+            node.content = need;
+            extent[m] = extent[m].max(need);
+        }
         let (flow, absolute): (Vec<usize>, Vec<usize>) = self.kids[i]
             .iter()
             .partition(|&&k| self.tree.nodes[k].absolute.is_none());
@@ -437,7 +553,7 @@ impl Pass<'_> {
                 }
             }
         }
-        let mut pen = origin[m] + offset;
+        let mut pen = origin[m] + offset - scroll;
         for (idx, &k) in flow.iter().enumerate() {
             let main = if weight_sum > 0.0 && weights[idx] > 0.0 {
                 free.max(0.0) * weights[idx] / weight_sum
@@ -475,6 +591,7 @@ impl Pass<'_> {
                     w: kr[2],
                     h: kr[3],
                 },
+                child_clip,
                 depth + 1,
             );
             pen += main + n.gap + extra_gap;
@@ -492,44 +609,68 @@ impl Pass<'_> {
                 Size::Fill(_) => extent[1],
                 Size::Auto => self.intrinsic[k][1],
             };
+            let mut at = [origin[0] + ax, origin[1] + ay];
+            at[m] -= scroll;
             self.arrange(
                 k,
                 Rect {
-                    x: origin[0] + ax,
-                    y: origin[1] + ay,
+                    x: at[0],
+                    y: at[1],
                     w,
                     h,
                 },
+                child_clip,
                 depth + 1,
             );
         }
     }
 }
 
-/// Computes every node's `rect` for a screen of `viewport` units.
+/// Computes every node's `rect`, `clip`, `lines` and scroll state for a
+/// screen of `viewport` units. Wrapping text makes a node's height depend on
+/// its width, which the flow decides, so the pass repeats (at most four
+/// times) until the widths wrapping nodes got stop changing.
 pub fn layout(tree: &mut Tree, viewport: [f32; 2]) {
     let kids = tree.children();
     let roots = tree.roots();
     let count = tree.nodes.len();
-    let mut pass = Pass {
-        tree,
-        kids,
-        intrinsic: vec![[0.0; 2]; count],
-    };
-    for &r in &roots {
-        pass.measure(r, 0);
-    }
-    for &r in &roots {
-        let n = &pass.tree.nodes[r];
-        let [ox, oy] = n.absolute.unwrap_or([0.0; 2]);
-        let size = |s: Size, own: f32, screen: f32| match s {
-            Size::Fixed(v) => v,
-            Size::Fill(_) => screen,
-            Size::Auto => own,
+    let mut hints: Vec<Option<f32>> = vec![None; count];
+    for _ in 0..4 {
+        let mut pass = Pass {
+            tree,
+            kids: kids.clone(),
+            intrinsic: vec![[0.0; 2]; count],
+            hints: hints.clone(),
+            next: vec![None; count],
         };
-        let w = size(n.width, pass.intrinsic[r][0], viewport[0]);
-        let h = size(n.height, pass.intrinsic[r][1], viewport[1]);
-        pass.arrange(r, Rect { x: ox, y: oy, w, h }, 0);
+        for &r in &roots {
+            pass.measure(r, 0);
+        }
+        for &r in &roots {
+            let n = &pass.tree.nodes[r];
+            let [ox, oy] = n.absolute.unwrap_or([0.0; 2]);
+            let size = |s: Size, own: f32, screen: f32| match s {
+                Size::Fixed(v) => v,
+                Size::Fill(_) => screen,
+                Size::Auto => own,
+            };
+            let w = size(n.width, pass.intrinsic[r][0], viewport[0]);
+            let h = size(n.height, pass.intrinsic[r][1], viewport[1]);
+            pass.arrange(r, Rect { x: ox, y: oy, w, h }, None, 0);
+        }
+        let next = pass.next;
+        if next == hints {
+            break;
+        }
+        hints = next;
+    }
+    for n in &mut tree.nodes {
+        n.lines = if n.wrap {
+            let width = n.rect.w - n.padding[0] - n.padding[2];
+            wrap_text(&n.text, n.text_scale, width)
+        } else {
+            n.text.clone()
+        };
     }
 }
 
@@ -750,5 +891,163 @@ mod tests {
             vec![0, 1],
             "self and dangling parents make roots"
         );
+    }
+
+    #[test]
+    fn text_wraps_at_spaces_and_breaks_long_words() {
+        // 11 columns: 5 + 10 * 6 = 65 units at scale 1.
+        assert_eq!(chars_per_line(65.0, 1.0), 11);
+        assert_eq!(chars_per_line(64.9, 1.0), 10);
+        assert_eq!(chars_per_line(0.0, 1.0), 1, "never fewer than one column");
+        assert_eq!(chars_per_line(130.0, 2.0), 11, "scale divides the width");
+        assert_eq!(
+            wrap_text("the quick brown fox", 1.0, 65.0),
+            "the quick\nbrown fox"
+        );
+        assert_eq!(wrap_text("short", 1.0, 65.0), "short");
+        assert_eq!(
+            wrap_text("abcdefghijklmnop", 1.0, 65.0),
+            "abcdefghijk\nlmnop"
+        );
+        assert_eq!(
+            wrap_text("a\n\nb", 1.0, 65.0),
+            "a\n\nb",
+            "explicit breaks stay"
+        );
+        assert_eq!(wrap_text("", 1.0, 65.0), "");
+        // One column: every character is its own line.
+        assert_eq!(wrap_text("aa bb", 1.0, 5.0), "a\na\nb\nb");
+    }
+
+    #[test]
+    fn a_wrapping_label_gets_taller_when_its_width_is_narrow() {
+        let make = |width: f32| {
+            let mut t = Tree {
+                nodes: vec![
+                    Node {
+                        width: Size::Fixed(width),
+                        padding: [2.0; 4],
+                        ..node(None)
+                    },
+                    Node {
+                        width: Size::Fill(1.0),
+                        text: "the quick brown fox jumps".into(),
+                        wrap: true,
+                        ..node(Some(0))
+                    },
+                    fixed(Some(0), 10.0, 5.0),
+                ],
+            };
+            layout(&mut t, [300.0, 300.0]);
+            t
+        };
+        // Wide: one line of 7 units, then the box below it.
+        let wide = make(300.0);
+        assert_eq!(wide.nodes[1].lines, "the quick brown fox jumps");
+        assert_eq!(wide.nodes[1].rect.h, 7.0);
+        // 71 units wide inside the padding: 11 columns, so three lines, and the
+        // box below moves down by the extra two lines.
+        let narrow = make(75.0);
+        assert_eq!(narrow.nodes[1].lines, "the quick\nbrown fox\njumps");
+        assert_eq!(narrow.nodes[1].rect.h, 7.0 + 2.0 * 9.0);
+        assert_eq!(narrow.nodes[2].rect.y, 2.0 + 25.0);
+        // The parent grew to hold it (it is Auto high).
+        assert_eq!(narrow.nodes[0].rect.h, 2.0 + 25.0 + 5.0 + 2.0);
+    }
+
+    #[test]
+    fn a_scroll_container_shifts_and_clips_its_children() {
+        let mut nodes = vec![Node {
+            width: Size::Fixed(50.0),
+            height: Size::Fixed(30.0),
+            scroll: true,
+            scroll_offset: 25.0,
+            padding: [0.0, 5.0, 0.0, 5.0],
+            ..node(None)
+        }];
+        for _ in 0..4 {
+            nodes.push(fixed(Some(0), 50.0, 20.0));
+        }
+        let mut t = Tree { nodes };
+        layout(&mut t, [200.0, 200.0]);
+        // Content: 4 * 20 = 80 inside a 20-unit view (30 - padding).
+        assert_eq!(t.nodes[0].content, 80.0);
+        assert_eq!(t.nodes[0].scroll_offset, 25.0);
+        assert_eq!(t.nodes[1].rect.y, 5.0 - 25.0);
+        assert_eq!(t.nodes[2].rect.y, 0.0, "5 + 20 - 25");
+        let clip = t.nodes[1]
+            .clip
+            .expect("children of a scroll container are clipped");
+        assert_eq!((clip.x, clip.y, clip.w, clip.h), (0.0, 0.0, 50.0, 30.0));
+        assert_eq!(
+            t.nodes[0].clip, None,
+            "the container itself is not clipped by itself"
+        );
+        // An offset past the end is clamped.
+        t.nodes[0].scroll_offset = 1000.0;
+        layout(&mut t, [200.0, 200.0]);
+        assert_eq!(t.nodes[0].scroll_offset, 60.0);
+        t.nodes[0].scroll_offset = -5.0;
+        layout(&mut t, [200.0, 200.0]);
+        assert_eq!(t.nodes[0].scroll_offset, 0.0);
+    }
+
+    #[test]
+    fn nested_scroll_containers_intersect_their_clips() {
+        let mut t = Tree {
+            nodes: vec![
+                Node {
+                    scroll: true,
+                    ..fixed(None, 100.0, 50.0)
+                },
+                Node {
+                    scroll: true,
+                    scroll_offset: 0.0,
+                    ..fixed(Some(0), 100.0, 80.0)
+                },
+                fixed(Some(1), 40.0, 200.0),
+            ],
+        };
+        layout(&mut t, [300.0, 300.0]);
+        let c = t.nodes[2].clip.unwrap();
+        assert_eq!(
+            (c.w, c.h),
+            (100.0, 50.0),
+            "the outer view is the smaller one"
+        );
+        assert_eq!(t.nodes[1].clip.map(|c| c.h), Some(50.0));
+    }
+
+    #[test]
+    fn rect_intersection() {
+        let a = Rect {
+            x: 0.0,
+            y: 0.0,
+            w: 10.0,
+            h: 10.0,
+        };
+        let b = Rect {
+            x: 5.0,
+            y: 8.0,
+            w: 10.0,
+            h: 10.0,
+        };
+        assert_eq!(
+            a.intersect(&b),
+            Rect {
+                x: 5.0,
+                y: 8.0,
+                w: 5.0,
+                h: 2.0
+            }
+        );
+        let far = Rect {
+            x: 50.0,
+            y: 50.0,
+            w: 1.0,
+            h: 1.0,
+        };
+        let none = a.intersect(&far);
+        assert!(none.w == 0.0 || none.h == 0.0);
     }
 }

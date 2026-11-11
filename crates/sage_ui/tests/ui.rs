@@ -102,6 +102,7 @@ impl Ui {
             y,
             present: 1,
             down: down as u32,
+            wheel: 0.0,
         });
     }
 
@@ -404,4 +405,172 @@ fn editing_a_style_prefab_restyles_its_instances() {
     other.tick();
     assert_eq!(other.eval::<u32>("fill_of(a)"), 0x2E86_ABFF);
     assert_eq!(other.hash(), ui.hash());
+}
+
+impl Ui {
+    fn wheel(&self, x: f32, y: f32, notches: f32) {
+        self.world.set(UiPointer {
+            x,
+            y,
+            present: 1,
+            down: 0,
+            wheel: notches,
+        });
+        self.tick();
+        self.pointer(x, y, false);
+        self.tick();
+    }
+}
+
+const LIST: &str = r#"
+import sage
+from sage.ui import Rect, Scroll, Slider, Caret, Label, TextStyle, Clicked, Interaction
+
+ui = world.ui
+ui.start()
+log = []
+root = ui.panel(width=100, height=100, gap=0)
+area = ui.scroll(root, width=ui.fill(), height=40)
+rows = [ui.button(area, f"row {k}", width=ui.fill(), height=20) for k in range(6)]
+note = ui.text(root, "the quick brown fox jumps over", wrap=True, width=ui.fill())
+bar = ui.meter(root, value=3, low=0, high=10, width=ui.fill())
+field = ui.text_input(root, "hello", width=ui.fill())
+
+@world.observer(Clicked)
+def clicked(c: Clicked):
+    log.append(c.target)
+
+def center(e):
+    r = e.get(Rect)
+    return (r.x + r.w / 2, r.y + r.h / 2)
+
+def y_of(e):
+    return e.get(Rect).y
+def h_of(e):
+    return e.get(Rect).h
+"#;
+
+#[test]
+fn a_scroll_area_scrolls_with_the_wheel_and_clips_what_it_hides() {
+    let ui = Ui::new(LIST);
+    ui.tick();
+    assert_eq!(ui.eval::<f32>("area.get(Scroll).offset"), 0.0);
+    assert_eq!(
+        ui.eval::<f32>("y_of(rows[5])"),
+        100.0,
+        "laid out below the view"
+    );
+    let (x, y) = ui.eval::<(f32, f32)>("center(area)");
+    ui.wheel(x, y, 2.0);
+    assert_eq!(ui.eval::<f32>("area.get(Scroll).offset"), 24.0);
+    assert_eq!(ui.eval::<f32>("y_of(rows[0])"), -24.0, "content moved up");
+    // A click on the visible part of the scrolled content reaches the right
+    // row (the second, which is cut off at the top).
+    let sid = ui.eval::<u64>("rows[1].sid");
+    ui.pointer(5.0, 5.0, true);
+    ui.tick();
+    ui.pointer(5.0, 5.0, false);
+    ui.tick();
+    assert!(ui.take_log().contains(&sid.to_string()));
+    // Focusing a partly hidden row scrolled it fully into view: 24 -> 20.
+    assert_eq!(ui.eval::<f32>("area.get(Scroll).offset"), 20.0);
+    // The frame cuts the rows at the area and draws a scrollbar.
+    let f = sage_ui::frame(&ui.world, &ui.ecs);
+    let rects: Vec<_> = f
+        .draws
+        .iter()
+        .filter_map(|d| match d {
+            UiDraw::Rect { pos, size, .. } => Some((*pos, *size)),
+            _ => None,
+        })
+        .collect();
+    assert!(
+        rects.iter().all(|(p, s)| !(p[1] < 40.0
+            && p[1] + s[1] > 40.0
+            && p[0] < 99.0
+            && s[1] < 20.0
+            && p[1] > 20.0)),
+        "nothing straddles the area's bottom edge"
+    );
+    assert!(
+        rects.iter().any(|(_, s)| s[0] == 2.0),
+        "the scrollbar thumb: {:#?}",
+        f.draws
+    );
+    // It is state: it hashes, and a save game restores the offset.
+    let text = ui.ecs.save_game(Default::default());
+    let other = Ui::new(LIST);
+    other.ecs.load_game(&text, Policy::Strict).unwrap();
+    assert_eq!(other.eval::<f32>("area.get(Scroll).offset"), 20.0);
+    assert_eq!(other.hash(), ui.hash());
+}
+
+#[test]
+fn wrapping_text_gets_taller_in_a_narrow_parent_and_meters_show_values() {
+    let ui = Ui::new(LIST);
+    ui.tick();
+    // 100 wide: 11 columns need 65 units, so "the quick brown fox jumps over"
+    // (30 chars, 16 columns at 100 wide) fits on two lines.
+    let lines = ui.eval::<f32>("h_of(note) / 9.0");
+    assert!(
+        lines > 1.0 && lines < 3.0,
+        "two lines of 7..9 units: {}",
+        ui.eval::<f32>("h_of(note)")
+    );
+    let narrow = Ui::new(&LIST.replace("width=100, height=100", "width=50, height=100"));
+    narrow.tick();
+    assert!(
+        narrow.eval::<f32>("h_of(note)") > ui.eval::<f32>("h_of(note)"),
+        "narrower means taller"
+    );
+    let f = sage_ui::frame(&ui.world, &ui.ecs);
+    let wrapped = f
+        .draws
+        .iter()
+        .any(|d| matches!(d, UiDraw::Text { text, .. } if text.contains('\n')));
+    assert!(wrapped, "the wrapped lines are what is drawn");
+    // The meter: 3 of 10 fills 30% of its width, and ignores the pointer.
+    let (x, y) = ui.eval::<(f32, f32)>("center(bar)");
+    ui.pointer(x, y, true);
+    ui.tick();
+    ui.pointer(x, y, false);
+    ui.tick();
+    assert_eq!(ui.take_log(), "[]");
+    assert_eq!(
+        ui.eval::<u64>("world.get(Interaction).focus"),
+        0,
+        "a meter takes no focus"
+    );
+}
+
+#[test]
+fn the_caret_is_a_component_and_edits_happen_at_it() {
+    let ui = Ui::new(LIST);
+    ui.tick();
+    let (x, y) = ui.eval::<(f32, f32)>("center(field)");
+    // Click after two glyphs of "hello": the text starts 3 units in.
+    let left = ui.eval::<f32>("field.get(Rect).x") + 3.0;
+    let _ = x;
+    ui.pointer(left + 6.0 * 2.0 + 1.0, y, true);
+    ui.tick();
+    ui.pointer(left + 6.0 * 2.0 + 1.0, y, false);
+    ui.tick();
+    assert_eq!(ui.eval::<u32>("field.get(Caret).pos"), 2);
+    ui.typed('X');
+    ui.tick();
+    ui.typed('\0');
+    ui.tick();
+    assert_eq!(
+        ui.eval::<String>("world.string(field.get(Label).text)"),
+        "heXllo"
+    );
+    assert_eq!(ui.eval::<u32>("field.get(Caret).pos"), 3);
+    ui.nav(sage_core::host::NAV_DELETE);
+    ui.tick();
+    ui.nav(0);
+    ui.tick();
+    assert_eq!(
+        ui.eval::<String>("world.string(field.get(Label).text)"),
+        "heXlo"
+    );
 }

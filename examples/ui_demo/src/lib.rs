@@ -85,6 +85,7 @@ impl Demo {
             y: p[1],
             present: 1,
             down: down as u32,
+            wheel: 0.0,
         });
     }
 

@@ -23,6 +23,13 @@ class Box(Component):
     def __init__(self, width_kind: u32 = ..., width: f32 = ..., height_kind: u32 = ..., height: f32 = ...) -> None: ...
 
 
+class Caret(Component):
+    """Native component `sage.ui.Caret`."""
+
+    pos: u32
+    def __init__(self, pos: u32 = ...) -> None: ...
+
+
 class Changed(Component):
     """Native component `sage.ui.Changed`."""
 
@@ -101,7 +108,8 @@ class Pointer(Component):
     y: f32
     present: u32
     down: u32
-    def __init__(self, x: f32 = ..., y: f32 = ..., present: u32 = ..., down: u32 = ...) -> None: ...
+    wheel: f32
+    def __init__(self, x: f32 = ..., y: f32 = ..., present: u32 = ..., down: u32 = ..., wheel: f32 = ...) -> None: ...
 
 
 class Rect(Component):
@@ -120,6 +128,13 @@ class Screen(Component):
     w: f32
     h: f32
     def __init__(self, w: f32 = ..., h: f32 = ...) -> None: ...
+
+
+class Scroll(Component):
+    """Native component `sage.ui.Scroll`."""
+
+    offset: f32
+    def __init__(self, offset: f32 = ...) -> None: ...
 
 
 class Slider(Component):

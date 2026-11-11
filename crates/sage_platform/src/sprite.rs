@@ -283,7 +283,39 @@ pub fn compose_ui(frame: &UiFrame, viewport: [f32; 2], font: &BitmapFont) -> Spr
                 text,
                 scale: s,
                 color,
-            } => batch.text(font, text, at(*pos), scale * s, rgba(*color)),
+                clip,
+            } => {
+                let clip = clip.map(|[l, t, r, b]| {
+                    let (a, z) = (at([l, t]), at([r, b]));
+                    [a[0], a[1], z[0], z[1]]
+                });
+                for g in font.layout(text, at(*pos), scale * s) {
+                    let (mut p0, mut p1) = (g.pos, [g.pos[0] + g.size[0], g.pos[1] + g.size[1]]);
+                    let (mut uv0, mut uv1) = (g.uv_min, g.uv_max);
+                    if let Some(c) = clip {
+                        let (x0, y0) = (p0[0].max(c[0]), p0[1].max(c[1]));
+                        let (x1, y1) = (p1[0].min(c[2]), p1[1].min(c[3]));
+                        if x0 >= x1 || y0 >= y1 {
+                            continue;
+                        }
+                        // Cut the texture coordinates by the same fractions.
+                        let (fx0, fx1) = ((x0 - p0[0]) / g.size[0], (x1 - p0[0]) / g.size[0]);
+                        let (fy0, fy1) = ((y0 - p0[1]) / g.size[1], (y1 - p0[1]) / g.size[1]);
+                        let (du, dv) = (g.uv_max[0] - g.uv_min[0], g.uv_max[1] - g.uv_min[1]);
+                        uv0 = [g.uv_min[0] + du * fx0, g.uv_min[1] + dv * fy0];
+                        uv1 = [g.uv_min[0] + du * fx1, g.uv_min[1] + dv * fy1];
+                        (p0, p1) = ([x0, y0], [x1, y1]);
+                    }
+                    batch.quad(
+                        FONT,
+                        p0,
+                        [p1[0] - p0[0], p1[1] - p0[1]],
+                        uv0,
+                        uv1,
+                        rgba(*color),
+                    );
+                }
+            }
         }
     }
     batch
@@ -603,6 +635,7 @@ mod tests {
                     text: "A".into(),
                     scale: 1.0,
                     color: [255, 255, 255, 255],
+                    clip: None,
                 },
             ],
         };
@@ -628,5 +661,45 @@ mod tests {
         // the cell at (1, 1) * 2 + origin.
         let lit = (0..14).any(|dy| (0..10).any(|dx| at(12 + dx, 17 + dy) == [255, 255, 255, 255]));
         assert!(lit, "the glyph is visible");
+    }
+
+    #[test]
+    fn clipped_ui_text_is_cut_at_the_clip_and_keeps_its_pixels() {
+        // "I" at scale 1 is a 5x7 glyph; clip away its top three rows.
+        let font = BitmapFont::builtin();
+        let draw = |clip| UiFrame {
+            size: [10.0, 10.0],
+            draws: vec![UiDraw::Text {
+                pos: [1.0, 1.0],
+                text: "I".into(),
+                scale: 1.0,
+                color: [255; 4],
+                clip,
+            }],
+        };
+        let render = |frame: &UiFrame| {
+            let b = compose_ui(frame, [10.0, 10.0], &font);
+            rasterize(&b, &textures(), [0, 0, 0, 255], [10, 10])
+        };
+        let whole = render(&draw(None));
+        let cut = render(&draw(Some([0.0, 4.0, 10.0, 10.0])));
+        let lit = |px: &[[u8; 4]], rows: std::ops::Range<usize>| {
+            rows.flat_map(|y| (0..10).map(move |x| (x, y)))
+                .filter(|&(x, y)| px[y * 10 + x] != [0, 0, 0, 255])
+                .count()
+        };
+        assert!(
+            lit(&whole, 1..4) > 0,
+            "the glyph has pixels in its top rows"
+        );
+        assert_eq!(lit(&cut, 0..4), 0, "nothing above the clip");
+        assert_eq!(
+            lit(&cut, 4..10),
+            lit(&whole, 4..10),
+            "below the clip it is unchanged"
+        );
+        // A clip that excludes the whole glyph draws nothing.
+        let none = render(&draw(Some([8.0, 8.0, 10.0, 10.0])));
+        assert_eq!(lit(&none, 0..10), 0);
     }
 }

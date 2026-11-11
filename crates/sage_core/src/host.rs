@@ -54,6 +54,24 @@ pub const UI_GLYPH: [f32; 2] = [5.0, 7.0];
 pub const UI_ADVANCE: f32 = 6.0;
 pub const UI_LINE_HEIGHT: f32 = 9.0;
 
+/// Navigation bits, the UI's keyboard and gamepad input. A host sets them
+/// from its own keys; they are held-state, and the UI acts on the edge of a
+/// bit (pressed this tick, not held).
+pub const NAV_NEXT: u32 = 1 << 0;
+pub const NAV_PREV: u32 = 1 << 1;
+pub const NAV_ACCEPT: u32 = 1 << 2;
+pub const NAV_CANCEL: u32 = 1 << 3;
+pub const NAV_LEFT: u32 = 1 << 4;
+pub const NAV_RIGHT: u32 = 1 << 5;
+pub const NAV_UP: u32 = 1 << 6;
+pub const NAV_DOWN: u32 = 1 << 7;
+pub const NAV_BACKSPACE: u32 = 1 << 8;
+pub const NAV_HOME: u32 = 1 << 9;
+pub const NAV_END: u32 = 1 << 10;
+pub const NAV_DELETE: u32 = 1 << 11;
+pub const NAV_PAGE_UP: u32 = 1 << 12;
+pub const NAV_PAGE_DOWN: u32 = 1 << 13;
+
 /// One thing the UI module wants drawn. Colors are straight-alpha RGBA.
 #[derive(Clone, Debug, PartialEq)]
 pub enum UiDraw {
@@ -64,11 +82,14 @@ pub enum UiDraw {
         color: [u8; 4],
     },
     /// Text with its top-left corner at `pos`; `scale` multiplies the font.
+    /// `\n` starts a new line. Glyphs are cut off outside `clip` (left, top,
+    /// right, bottom) when there is one.
     Text {
         pos: [f32; 2],
         text: String,
         scale: f32,
         color: [u8; 4],
+        clip: Option<[f32; 4]>,
     },
 }
 

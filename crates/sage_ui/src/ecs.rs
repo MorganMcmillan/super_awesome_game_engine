@@ -3,7 +3,7 @@
 //!
 //! A UI element is an entity with a StableId and a [`UiRect`]. Its authored
 //! components (`Box`, `Flow`, `Paint`, `Label`, `ZIndex`, `Absolute`,
-//! `Widget`, `Toggle`, `Slider`) are written by users and prefabs; the system
+//! `Widget`, `Toggle`, `Slider`, `Scroll`, `Caret`) are written by users and prefabs; the system
 //! writes the computed ones (`Rect`, `Widget.state`, and the values of
 //! toggles, sliders and text inputs). The parent is the `ChildOf` target;
 //! siblings flow in StableId order.
@@ -27,7 +27,7 @@ use sage_ecs_py::{Ecs, StableIdC};
 use sage_scene::StringTable;
 
 use crate::interact::{EventKind, UiInput, UiState, update};
-use crate::layout::{Align, Direction, Justify, Node, Rect, Size, Tree, Widget, layout};
+use crate::layout::{Align, Direction, Justify, Node, Size, Tree, Widget, layout};
 
 macro_rules! ui_component {
     ($(#[$m:meta])* $name:ident { $($f:ident : $t:ty),* $(,)? }) => {
@@ -94,6 +94,16 @@ ui_component!(
     /// 2 focused.
     UiWidget { kind: u32, enabled: u32, tab: i32, state: u32 }
 );
+ui_component!(
+    /// Makes a node a scroll container: `offset` is how far its content is
+    /// shifted along its flow direction. Computed by wheel, page and focus
+    /// scrolling, clamped to the content.
+    UiScroll { offset: f32 }
+);
+ui_component!(
+    /// A text input's caret, as a character index.
+    UiCaret { pos: u32 }
+);
 ui_component!(UiToggle { on: u32 });
 ui_component!(UiSlider {
     value: f32,
@@ -117,7 +127,8 @@ ui_component!(UiFocused { target: u64 });
 
 ui_component!(
     /// Input singleton: the pointer, in UI units. `present` 0 means none.
-    UiPointer { x: f32, y: f32, present: u32, down: u32 }
+    /// `wheel` is this tick's notches; positive scrolls content down.
+    UiPointer { x: f32, y: f32, present: u32, down: u32, wheel: f32 }
 );
 ui_component!(
     /// Input singleton: `NAV_*` bits held this tick.
@@ -148,6 +159,8 @@ struct Source {
     widget: Option<UiWidget>,
     toggle: Option<UiToggle>,
     slider: Option<UiSlider>,
+    scroll: Option<UiScroll>,
+    caret: Option<UiCaret>,
     label: Option<UiLabel>,
     text: String,
 }
@@ -162,8 +175,8 @@ fn entity_rows(world: &WorldRef) -> Vec<(u64, u64)> {
 }
 
 /// Reads the entities into a tree in StableId order. `computed` keeps the
-/// stored rectangles and interaction flags instead of leaving them for
-/// `layout` and `update` to compute.
+/// stored hover, pressed and focused flags instead of leaving them for
+/// `update` to compute.
 fn build(world: &WorldRef, strings: &StringTable, computed: bool) -> (Tree, Vec<Source>) {
     let rows = entity_rows(world);
     let index: BTreeMap<u64, usize> = rows.iter().enumerate().map(|(i, r)| (r.1, i)).collect();
@@ -183,6 +196,8 @@ fn build(world: &WorldRef, strings: &StringTable, computed: bool) -> (Tree, Vec<
         let widget = e.try_get::<&UiWidget>(|w| *w);
         let toggle = e.try_get::<&UiToggle>(|t| *t);
         let slider = e.try_get::<&UiSlider>(|s| *s);
+        let scroll = e.try_get::<&UiScroll>(|s| *s);
+        let caret = e.try_get::<&UiCaret>(|c| *c);
         let parent = unsafe { sys::ecs_get_parent(w, entity) };
         let mut n = Node {
             id: sid,
@@ -216,6 +231,14 @@ fn build(world: &WorldRef, strings: &StringTable, computed: bool) -> (Tree, Vec<
         if let Some(t) = style {
             n.text_color = t.color;
             n.text_scale = if t.scale > 0.0 { t.scale } else { 1.0 };
+            n.wrap = t.wrap != 0;
+        }
+        if let Some(sc) = scroll {
+            n.scroll = true;
+            n.scroll_offset = sc.offset;
+        }
+        if let Some(c) = caret {
+            n.caret = c.pos as usize;
         }
         if let Some(w) = widget {
             n.widget = Widget::from_u32(w.kind);
@@ -236,14 +259,6 @@ fn build(world: &WorldRef, strings: &StringTable, computed: bool) -> (Tree, Vec<
             n.max = s.max;
             n.step = s.step;
         }
-        if computed {
-            n.rect = Rect {
-                x: rect.x,
-                y: rect.y,
-                w: rect.w,
-                h: rect.h,
-            };
-        }
         tree.nodes.push(n);
         sources.push(Source {
             entity,
@@ -252,6 +267,8 @@ fn build(world: &WorldRef, strings: &StringTable, computed: bool) -> (Tree, Vec<
             widget,
             toggle,
             slider,
+            scroll,
+            caret,
             label,
             text,
         });
@@ -277,14 +294,20 @@ fn step(world: &WorldRef, strings: &RefCell<StringTable>) {
         focus: before.focus,
         prev_down: before.prev_down != 0,
         prev_nav: before.prev_nav,
+        scrolled: false,
     };
     let input = UiInput {
         pointer: (pointer.present != 0).then_some([pointer.x, pointer.y]),
         down: pointer.down != 0,
         nav,
         ch,
+        wheel: pointer.wheel,
     };
     let events = update(&mut tree, &mut state, &input);
+    if state.scrolled {
+        // Scrolling moved the content: place it again before it is stored.
+        layout(&mut tree, [screen.w, screen.h]);
+    }
 
     for (src, n) in sources.iter().zip(&tree.nodes) {
         let e = world.entity_from_id(src.entity);
@@ -312,6 +335,20 @@ fn step(world: &WorldRef, strings: &RefCell<StringTable>) {
             && (old.on != 0) != n.on
         {
             e.set(UiToggle { on: n.on as u32 });
+        }
+        if let Some(old) = src.scroll
+            && old.offset != n.scroll_offset
+        {
+            e.set(UiScroll {
+                offset: n.scroll_offset,
+            });
+        }
+        if let Some(old) = src.caret
+            && old.pos as usize != n.caret
+        {
+            e.set(UiCaret {
+                pos: n.caret as u32,
+            });
         }
         if let Some(old) = src.slider
             && old.value != n.value
@@ -360,7 +397,10 @@ fn step(world: &WorldRef, strings: &RefCell<StringTable>) {
 pub fn frame(world: &World, ecs: &Ecs) -> UiFrame {
     let screen = world.get::<&UiScreen>(|s| *s);
     let strings = ecs.strings();
-    let (tree, _) = build(&world.world(), &strings.borrow(), true);
+    let (mut tree, _) = build(&world.world(), &strings.borrow(), true);
+    // Layout is pure and cheap, and gives each node its clip and wrapped
+    // lines, which are not stored in components.
+    layout(&mut tree, [screen.w, screen.h]);
     crate::draw::draw(&tree, [screen.w, screen.h])
 }
 
@@ -419,6 +459,8 @@ pub fn setup(world: &World, ecs: &Ecs) -> Result<(), String> {
         UiAbsolute => "sage::ui::Absolute",
         UiWidget => "sage::ui::Widget",
         UiToggle => "sage::ui::Toggle",
+        UiScroll => "sage::ui::Scroll",
+        UiCaret => "sage::ui::Caret",
         UiSlider => "sage::ui::Slider",
         UiClicked => "sage::ui::Clicked",
         UiToggled => "sage::ui::Toggled",
