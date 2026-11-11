@@ -153,8 +153,8 @@ frozen = world.entity("frozen").set(Pos(3.0))
 frozen.add(Frozen)
 from sage import _ecs
 childof = world.lookup_path("flecs.core.ChildOf")
-child.add(childof, parent)
-frozen.add(childof, parent)
+child.add((childof, parent))
+frozen.add((childof, parent))
 
 out = []
 @world.system(query="!Frozen, Pos(up ChildOf)")
@@ -175,7 +175,7 @@ class Pos:
     x: float = 0.0
 parent = world.entity().set(Pos(1.0))
 child = world.entity().set(Pos(2.0))
-child.add(world.lookup_path("flecs.core.ChildOf"), parent)
+child.add((world.lookup_path("flecs.core.ChildOf"), parent))
 @world.system(query="Pos(up ChildOf)")
 def bad(pos: Pos, parent_pos):
     parent_pos.x = 5.0
@@ -600,7 +600,7 @@ play = world.module("play")
 for i in range(6):
     e = world.entity().set(Pos(i, 0)).set(Vel(world.rng.range_f32(-1, 1), 1))
     if i:
-        e.add(Likes, world.lookup(i))
+        e.add((Likes, world.lookup(i)))
         e.set(Link(world.lookup(i)))
 
 @play.system
@@ -627,7 +627,7 @@ fn hash_covers_values_relationships_modules_and_rng() {
     let before = a.hash();
     Python::attach(|py| {
         py.run(
-            c"world.lookup(2).remove(Likes, world.lookup(1))",
+            c"world.lookup(2).remove((Likes, world.lookup(1)))",
             Some(a.script.globals(py)),
             None,
         )
@@ -721,7 +721,7 @@ def take_damage(e: Entity, h: Health):
         g.eval::<usize>("len({x.sid for x in (goblin, dragon, Enemy.entity, Boss.entity)})"),
         4
     );
-    assert!(g.eval::<bool>("goblin.has(world.lookup_path('flecs.core.IsA'), Enemy)"));
+    assert!(g.eval::<bool>("goblin.has((world.lookup_path('flecs.core.IsA'), Enemy))"));
 }
 
 #[test]
@@ -797,11 +797,113 @@ fn prefabs_and_instances_round_trip_through_snapshots() {
     let before = b.hash();
     Python::attach(|py| {
         py.run(
-            c"world.lookup(3).remove(world.lookup_path('flecs.core.IsA'), Mover)",
+            c"world.lookup(3).remove((world.lookup_path('flecs.core.IsA'), Mover))",
             Some(b.script.globals(py)),
             None,
         )
         .unwrap();
     });
     assert_ne!(b.hash(), before);
+}
+
+const MULTI: &str = r#"
+@component
+class Pos:
+    x: float = 0.0
+    y: float = 0.0
+@component
+class Hp:
+    hp: sage.u32 = 10
+@component
+class Tag: pass
+@component
+class Other: pass
+@component
+class Likes: pass
+a = world.entity("a")
+b = world.entity("b")
+"#;
+
+#[test]
+fn add_takes_several_arguments_and_stores_instance_values() {
+    let g = Game::new(&src(MULTI));
+    // Classes, instances and pairs mix in one call. An instance keeps its
+    // values; a class starts from its defaults.
+    Python::attach(|py| {
+        py.run(
+            c"a.add(Pos(1.5, 2.5), Hp, Tag, (Likes, b))",
+            Some(g.script.globals(py)),
+            None,
+        )
+        .unwrap();
+    });
+    assert_eq!(g.eval::<f64>("a.get(Pos).x"), 1.5);
+    assert_eq!(g.eval::<f64>("a.get(Pos).y"), 2.5);
+    assert_eq!(g.eval::<i64>("a.get(Hp).hp"), 10);
+    assert!(g.eval::<bool>("a.has(Tag)"));
+    assert!(g.eval::<bool>("a.has((Likes, b))"));
+    assert!(!g.eval::<bool>("b.has((Likes, a))"));
+    // A tag instance adds the tag; adding what is already there changes nothing.
+    assert!(g.eval::<bool>("a.add(Tag(), Pos(9, 9)).get(Pos).x == 9.0"));
+    assert_eq!(g.eval::<f64>("a.get(Pos).y"), 9.0);
+}
+
+#[test]
+fn has_needs_every_argument_and_remove_skips_missing() {
+    let g = Game::new(&src(MULTI));
+    Python::attach(|py| {
+        py.run(
+            c"a.add(Pos(1, 2), Tag, (Likes, b))",
+            Some(g.script.globals(py)),
+            None,
+        )
+        .unwrap();
+    });
+    assert!(g.eval::<bool>("a.has(Pos, Tag, (Likes, b))"));
+    assert!(
+        !g.eval::<bool>("a.has(Pos, Tag, Other)"),
+        "one missing is enough"
+    );
+    // An instance stands for its component type; its value is not compared.
+    assert!(g.eval::<bool>("a.has(Pos(-1, -1))"));
+    // Removing several at once, including ones the entity lacks.
+    assert!(g.eval::<bool>(
+        "not a.remove(Pos, Other, (Likes, b), Tag(), (Likes, a)).has(Pos) \
+         and not a.has(Tag) and not a.has((Likes, b))"
+    ));
+}
+
+#[test]
+fn add_remove_has_reject_bad_arguments_before_changing_anything() {
+    let g = Game::new(&src(MULTI));
+    for (code, want) in [
+        ("a.add()", "at least one"),
+        ("a.remove()", "at least one"),
+        ("a.has()", "at least one"),
+        ("a.add(Tag, (Likes, b, a))", "got 3 items"),
+        ("a.add(Tag, (Likes,))", "got 1 items"),
+        ("a.add(Tag, 'nope')", "expected a component class"),
+    ] {
+        let err = Python::attach(|py| {
+            let c = std::ffi::CString::new(code).unwrap();
+            py.run(&c, Some(g.script.globals(py)), None)
+                .expect_err(code)
+                .to_string()
+        });
+        assert!(err.contains(want), "{code}: {err}");
+    }
+    // The failing calls above listed Tag first; none of them added it.
+    assert!(!g.eval::<bool>("a.has(Tag)"));
+}
+
+#[test]
+fn prefab_add_remove_has_take_the_same_arguments() {
+    let g = Game::new(&src(&format!(
+        "{}\nbase = world.prefab('base')\nbase.add(Pos(3, 4), Tag, (Likes, b))\n",
+        MULTI
+    )));
+    assert!(g.eval::<bool>("base.has(Pos, Tag, (Likes, b))"));
+    assert_eq!(g.eval::<f64>("base.get(Pos).y"), 4.0);
+    assert!(g.eval::<bool>("not base.remove(Tag, (Likes, b)).has(Tag)"));
+    assert!(g.eval::<bool>("base.has(Pos)"));
 }

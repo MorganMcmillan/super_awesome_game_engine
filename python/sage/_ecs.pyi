@@ -3,11 +3,17 @@
 # never does. Keep it in step with the #[pymethods] there. Underscored
 # methods are internal to `sage.ecs` and are left out.
 
-from typing import Any, Self, TypeVar
+from typing import Any, Self, TypeAlias, TypeVar
 
 # Not bound to Value: `@component` classes do not subclass it as far as a
 # type checker can tell.
 _T = TypeVar("_T")
+
+# What `add`, `remove` and `has` take: a tag or component class, an entity or
+# flecs module, a `(relationship, target)` pair, or (for `add`) a component
+# instance, whose value is stored. Instances are arbitrary objects to a type
+# checker, so the argument type is `object`.
+Pair: TypeAlias = tuple["type[Any] | Entity", "type[Any] | Entity"]
 
 class Value:
     """Storage for one component value: owned, or a view into the world."""
@@ -50,10 +56,17 @@ class Entity:
     def enabled(self) -> bool: ...
     def set(self, value: object) -> Self:
         """Sets a component value (copied in). Returns the entity for chaining."""
-    def add(self, what: type[Any] | Entity, target: type[Any] | Entity | None = None) -> Self:
-        """Adds a tag, a component (zeroed, then its defaults) or a pair."""
-    def remove(self, what: type[Any] | Entity, target: type[Any] | Entity | None = None) -> Self: ...
-    def has(self, what: type[Any] | Entity, target: type[Any] | Entity | None = None) -> bool: ...
+    def add(self, *items: object) -> Self:
+        """Adds each argument, in order: a tag or component class (a data
+        component starts from its defaults), a component instance (its value
+        is stored, like `set`), or a `(relationship, target)` tuple for a
+        pair. Every argument is checked before the first change."""
+    def remove(self, *items: type[Any] | Entity | Pair | object) -> Self:
+        """Removes each argument (an instance stands for its component type).
+        Ones the entity lacks are skipped."""
+    def has(self, *items: type[Any] | Entity | Pair | object) -> bool:
+        """True if the entity has every argument (an instance stands for its
+        component type; its value is not compared)."""
     def get(self, cls: type[_T]) -> _T | None:
         """The component value: a view while a callback runs (writes go to the
         world), else a copy. None if the entity does not have it."""

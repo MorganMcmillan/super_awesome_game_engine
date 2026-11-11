@@ -140,8 +140,8 @@ box("wall_top", ID_WALL_TOP, COURT_W / 2, COURT_H - WALL_HALF, COURT_W / 2, WALL
 box("wall_bottom", ID_WALL_BOTTOM, COURT_W / 2, WALL_HALF, COURT_W / 2, WALL_HALF).add(Wall)
 left_player = world.entity("player_left", sid=ID_PLAYER_LEFT).set(Player(LEFT))
 right_player = world.entity("player_right", sid=ID_PLAYER_RIGHT).set(Player(RIGHT))
-box("side_left", ID_GOAL_LEFT, -2.0, COURT_H / 2, 2.0, COURT_H / 2).set(GoalSide(LEFT)).add(Opponent, right_player)
-box("side_right", ID_GOAL_RIGHT, COURT_W + 2.0, COURT_H / 2, 2.0, COURT_H / 2).set(GoalSide(RIGHT)).add(Opponent, left_player)
+box("side_left", ID_GOAL_LEFT, -2.0, COURT_H / 2, 2.0, COURT_H / 2).set(GoalSide(LEFT)).add((Opponent, right_player))
+box("side_right", ID_GOAL_RIGHT, COURT_W + 2.0, COURT_H / 2, 2.0, COURT_H / 2).set(GoalSide(RIGHT)).add((Opponent, left_player))
 for sid, name, side, x in [
     (ID_PADDLE_LEFT, "paddle_left", LEFT, PADDLE_X),
     (ID_PADDLE_RIGHT, "paddle_right", RIGHT, COURT_W - PADDLE_X),

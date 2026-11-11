@@ -456,19 +456,19 @@ class Prefab:
         self.entity.set(value)
         return self
 
-    def add(self, what, target=None):
-        self.entity.add(what, target)
+    def add(self, *items):
+        self.entity.add(*items)
         return self
 
-    def remove(self, what, target=None):
-        self.entity.remove(what, target)
+    def remove(self, *items):
+        self.entity.remove(*items)
         return self
 
     def get(self, cls):
         return self.entity.get(cls)
 
-    def has(self, what, target=None):
-        return self.entity.has(what, target)
+    def has(self, *items):
+        return self.entity.has(*items)
 
     def __repr__(self):
         return f"Prefab({self.entity.path})"

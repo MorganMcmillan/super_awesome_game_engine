@@ -8,7 +8,7 @@ use std::rc::Rc;
 use flecs_ecs::sys;
 use pyo3::exceptions::{PyKeyError, PyRuntimeError, PyTypeError, PyValueError};
 use pyo3::prelude::*;
-use pyo3::types::{PyList, PyTuple};
+use pyo3::types::{PyList, PyTuple, PyType};
 
 use crate::ffi::{self, RawWorld};
 use crate::registry::{FieldInfo, Kind, Layout, RegId, Registry, TypeInfo};
@@ -46,12 +46,61 @@ pub(crate) fn id_of(obj: &Bound<'_, PyAny>) -> PyResult<u64> {
     )))
 }
 
-fn id_with_target(first: &Bound<'_, PyAny>, target: Option<&Bound<'_, PyAny>>) -> PyResult<u64> {
-    let rel = id_of(first)?;
-    Ok(match target {
-        Some(t) => ffi::pair(rel, id_of(t)?),
-        None => rel,
-    })
+/// What one argument of `add`, `remove` or `has` names.
+enum Item<'py> {
+    /// A tag, component class, entity or flecs module. The argument is kept
+    /// so `add` can build a default value from a component class.
+    Id(u64, Bound<'py, PyAny>),
+    /// A `(relationship, target)` tuple.
+    Pair(u64),
+    /// A component instance. `add` stores its value; `remove` and `has` use
+    /// only its type.
+    Value(u64, Bound<'py, PyAny>),
+}
+
+impl Item<'_> {
+    fn id(&self) -> u64 {
+        match self {
+            Item::Id(id, _) | Item::Pair(id) | Item::Value(id, _) => *id,
+        }
+    }
+}
+
+fn item_of<'py>(obj: &Bound<'py, PyAny>) -> PyResult<Item<'py>> {
+    if let Ok(t) = obj.cast::<PyTuple>() {
+        if t.len() != 2 {
+            return Err(PyTypeError::new_err(format!(
+                "a pair is a (relationship, target) tuple, got {} items",
+                t.len()
+            )));
+        }
+        let rel = id_of(&t.get_item(0)?)?;
+        let target = id_of(&t.get_item(1)?)?;
+        return Ok(Item::Pair(ffi::pair(rel, target)));
+    }
+    // An instance of a component class carries `__sage_id__` through its
+    // class, so it must be recognized before `id_of` would reduce it to the
+    // component's id and lose its value.
+    let plain = obj.is_instance_of::<PyType>()
+        || obj.cast::<Entity>().is_ok()
+        || obj.extract::<u64>().is_ok();
+    if !plain {
+        let ty = obj.get_type().into_any();
+        if ty.hasattr(pyo3::intern!(obj.py(), "__sage_id__"))? {
+            return Ok(Item::Value(id_of(&ty)?, obj.clone()));
+        }
+    }
+    Ok(Item::Id(id_of(obj)?, obj.clone()))
+}
+
+/// Every argument, classified. Nothing has been changed yet if this fails.
+fn items_of<'py>(method: &str, args: &Bound<'py, PyTuple>) -> PyResult<Vec<Item<'py>>> {
+    if args.is_empty() {
+        return Err(PyTypeError::new_err(format!(
+            "{method}() needs at least one tag, component or pair"
+        )));
+    }
+    args.iter().map(|a| item_of(&a)).collect()
 }
 
 fn type_layout(reg: &Registry, id: u64) -> PyResult<(usize, Layout)> {
@@ -252,54 +301,70 @@ impl Entity {
         Ok(slf.clone())
     }
 
-    /// Adds a tag, a component (zeroed, then its defaults) or a pair.
-    #[pyo3(signature = (what, target=None))]
-    fn add<'py>(
-        slf: &Bound<'py, Self>,
-        what: &Bound<'py, PyAny>,
-        target: Option<&Bound<'py, PyAny>>,
-    ) -> PyResult<Bound<'py, Self>> {
+    /// Adds each argument, in order. An argument is a tag or component class
+    /// (a data component starts from its defaults), a component instance
+    /// (its value is stored, like `set`), or a `(relationship, target)`
+    /// tuple for a pair. Every argument is checked before the first change.
+    #[pyo3(signature = (*items))]
+    fn add<'py>(slf: &Bound<'py, Self>, items: &Bound<'py, PyTuple>) -> PyResult<Bound<'py, Self>> {
         let (reg, w) = slf.borrow().live()?;
         let e = slf.borrow().id;
-        let id = id_with_target(what, target)?;
-        let size = if ffi::is_pair(id) {
-            0
-        } else {
-            ffi::type_size(w, id)
-        };
-        if size > 0 && target.is_none() && what.hasattr("__sage_fields__")? {
-            // A data component: add with its defaults, like set(Cls()).
-            let v = what.call0()?;
-            set_value(&reg, e, &v)?;
-        } else {
-            let new = !ffi::has(w, e, id);
-            ffi::add(w, e, id);
-            if new {
-                reg.structural_change();
+        for item in items_of("add", items)? {
+            match item {
+                Item::Value(_, v) => set_value(&reg, e, &v)?,
+                Item::Id(id, what) => {
+                    if ffi::type_size(w, id) > 0 && what.hasattr("__sage_fields__")? {
+                        // A data component: add with its defaults, like set(Cls()).
+                        set_value(&reg, e, &what.call0()?)?;
+                    } else if !ffi::has(w, e, id) {
+                        ffi::add(w, e, id);
+                        reg.structural_change();
+                    }
+                }
+                Item::Pair(id) => {
+                    if !ffi::has(w, e, id) {
+                        ffi::add(w, e, id);
+                        reg.structural_change();
+                    }
+                }
             }
         }
         Ok(slf.clone())
     }
 
-    #[pyo3(signature = (what, target=None))]
+    /// Removes each argument (classes, entities, `(relationship, target)`
+    /// tuples; an instance stands for its component type). Ones the entity
+    /// lacks are skipped.
+    #[pyo3(signature = (*items))]
     fn remove<'py>(
         slf: &Bound<'py, Self>,
-        what: &Bound<'py, PyAny>,
-        target: Option<&Bound<'py, PyAny>>,
+        items: &Bound<'py, PyTuple>,
     ) -> PyResult<Bound<'py, Self>> {
         let (reg, w) = slf.borrow().live()?;
-        let id = id_with_target(what, target)?;
-        if ffi::has(w, slf.borrow().id, id) {
-            ffi::remove(w, slf.borrow().id, id);
+        let e = slf.borrow().id;
+        let mut changed = false;
+        for item in items_of("remove", items)? {
+            let id = item.id();
+            if ffi::has(w, e, id) {
+                ffi::remove(w, e, id);
+                changed = true;
+            }
+        }
+        if changed {
             reg.structural_change();
         }
         Ok(slf.clone())
     }
 
-    #[pyo3(signature = (what, target=None))]
-    fn has(&self, what: &Bound<'_, PyAny>, target: Option<&Bound<'_, PyAny>>) -> PyResult<bool> {
+    /// True if the entity has every argument (classes, entities,
+    /// `(relationship, target)` tuples; an instance stands for its component
+    /// type, its value is not compared).
+    #[pyo3(signature = (*items))]
+    fn has(&self, items: &Bound<'_, PyTuple>) -> PyResult<bool> {
         let (_, w) = self.live()?;
-        Ok(ffi::has(w, self.id, id_with_target(what, target)?))
+        Ok(items_of("has", items)?
+            .iter()
+            .all(|i| ffi::has(w, self.id, i.id())))
     }
 
     /// The component value: a view while a callback runs (writes go to the
