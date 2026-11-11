@@ -16,6 +16,7 @@ pub mod gpu;
 pub mod input;
 pub mod mixer;
 pub mod sprite;
+pub mod ui_window;
 
 use std::rc::Rc;
 use std::time::{Duration, Instant};

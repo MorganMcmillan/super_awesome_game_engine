@@ -6,7 +6,7 @@
 //! falls back to the simple Render API (`SdlRenderer`).
 
 use sage_assets::{BitmapFont, Image};
-use sage_core::host::Frame;
+use sage_core::host::{Frame, UiFrame};
 use sdl3::gpu::{
     BlendFactor, BlendOp, BufferBinding, BufferRegion, BufferUsageFlags, ColorTargetBlendState,
     ColorTargetDescription, ColorTargetInfo, CullMode, Device, FillMode, Filter, GraphicsPipeline,
@@ -423,8 +423,13 @@ impl GpuRenderer {
     }
 }
 
-impl Renderer for GpuRenderer {
-    fn draw(&mut self, frame: &Frame) -> Result<(), String> {
+impl GpuRenderer {
+    /// Draws one frame into the window's swapchain; `make` builds the batch
+    /// for the viewport (the window's size in pixels).
+    fn present(
+        &mut self,
+        make: impl FnOnce(&GpuRenderer, [f32; 2]) -> SpriteBatch,
+    ) -> Result<(), String> {
         let window = self.window.take().ok_or("this renderer has no window")?;
         let result = (|| {
             let mut cmd = self.device.acquire_command_buffer().map_err(err)?;
@@ -436,11 +441,22 @@ impl Renderer for GpuRenderer {
             };
             let format = self.device.get_swapchain_texture_format(&window);
             let viewport = [swapchain.width() as f32, swapchain.height() as f32];
-            let batch = sprite::compose(frame, viewport, self.mode, &self.font, &self.skin);
+            let batch = make(self, viewport);
             self.record(&cmd, &swapchain, format, &batch)?;
             cmd.submit().map_err(err)
         })();
         self.window = Some(window);
         result
+    }
+
+    /// Draws a UI frame (`sprite::compose_ui`) into the window.
+    pub fn draw_ui(&mut self, frame: &UiFrame) -> Result<(), String> {
+        self.present(|r, viewport| sprite::compose_ui(frame, viewport, &r.font))
+    }
+}
+
+impl Renderer for GpuRenderer {
+    fn draw(&mut self, frame: &Frame) -> Result<(), String> {
+        self.present(|r, viewport| sprite::compose(frame, viewport, r.mode, &r.font, &r.skin))
     }
 }

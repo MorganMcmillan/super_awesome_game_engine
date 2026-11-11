@@ -258,18 +258,28 @@ pub fn compose(
     batch
 }
 
-/// Builds the batch for a UI frame: an integer scale (crisp, like the
-/// pixel-perfect camera) that fits `frame.size` in the viewport, centered.
-/// Draw commands keep their order, so later ones cover earlier ones.
-pub fn compose_ui(frame: &UiFrame, viewport: [f32; 2], font: &BitmapFont) -> SpriteBatch {
-    let scale = (viewport[0] / frame.size[0])
-        .min(viewport[1] / frame.size[1])
+/// How a UI of `ui` units is placed in a viewport of pixels: the largest
+/// whole-number scale that fits (crisp, like the pixel-perfect camera), and
+/// the pixel position of the UI's top-left corner when it is centered. The
+/// window loop uses the same numbers to turn the mouse position back into
+/// UI units.
+pub fn ui_view(viewport: [f32; 2], ui: [f32; 2]) -> (f32, [f32; 2]) {
+    let scale = (viewport[0] / ui[0])
+        .min(viewport[1] / ui[1])
         .floor()
         .max(1.0);
     let origin = [
-        ((viewport[0] - frame.size[0] * scale) / 2.0).floor(),
-        ((viewport[1] - frame.size[1] * scale) / 2.0).floor(),
+        ((viewport[0] - ui[0] * scale) / 2.0).floor(),
+        ((viewport[1] - ui[1] * scale) / 2.0).floor(),
     ];
+    (scale, origin)
+}
+
+/// Builds the batch for a UI frame at the scale and position of
+/// [`ui_view`]. Draw commands keep their order, so later ones cover earlier
+/// ones.
+pub fn compose_ui(frame: &UiFrame, viewport: [f32; 2], font: &BitmapFont) -> SpriteBatch {
+    let (scale, origin) = ui_view(viewport, frame.size);
     let at = |p: [f32; 2]| [origin[0] + p[0] * scale, origin[1] + p[1] * scale];
     let rgba = |c: [u8; 4]| c.map(|v| f32::from(v) / 255.0);
     let mut batch = SpriteBatch::new(viewport);
@@ -701,5 +711,19 @@ mod tests {
         // A clip that excludes the whole glyph draws nothing.
         let none = render(&draw(Some([8.0, 8.0, 10.0, 10.0])));
         assert_eq!(lit(&none, 0..10), 0);
+    }
+
+    #[test]
+    fn ui_view_scales_by_whole_numbers_and_centers() {
+        assert_eq!(ui_view([100.0, 70.0], [40.0, 20.0]), (2.0, [10.0, 15.0]));
+        assert_eq!(ui_view([960.0, 600.0], [160.0, 100.0]), (6.0, [0.0, 0.0]));
+        // Smaller than the UI: never below 1.
+        assert_eq!(ui_view([10.0, 10.0], [40.0, 20.0]).0, 1.0);
+        // The mapping the window loop inverts: pixel -> UI units.
+        let (scale, origin) = ui_view([100.0, 70.0], [40.0, 20.0]);
+        assert_eq!(
+            ((30.0 - origin[0]) / scale, (25.0 - origin[1]) / scale),
+            (10.0, 5.0)
+        );
     }
 }
