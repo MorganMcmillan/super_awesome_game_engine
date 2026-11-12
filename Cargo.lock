@@ -742,6 +742,7 @@ version = "0.0.1"
 dependencies = [
  "flecs_ecs",
  "pyo3",
+ "sage_assets",
  "sage_core",
  "sage_ecs_py",
  "sage_scene",

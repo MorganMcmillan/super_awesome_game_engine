@@ -10,13 +10,19 @@ use pyo3::prelude::*;
 use sage_assets::{BitmapFont, Image};
 use sage_core::host::{NAV_ACCEPT, NAV_NEXT, UiFrame};
 use sage_ecs_py::Ecs;
-use sage_platform::sprite::{compose_ui, rasterize};
+use sage_platform::sprite::{UiResources, compose_ui, rasterize};
 use sage_platform::ui_window::{UiApp, UiTickInput};
 use sage_script::Script;
 use sage_ui::ecs::{UiNav, UiPointer, UiScreen, UiTextEntry};
 
 pub const THEME: &str = include_str!("../scripts/theme.py");
 pub const SCRIPT: &str = include_str!("../scripts/playground.py");
+
+/// The pages loaded after the main script, by name. A page registers
+/// itself with `world.add_page`.
+pub const PAGES: &[(&str, &str)] = &[("style", include_str!("../scripts/pages/style.py"))];
+
+pub mod assets;
 
 /// The UI's size in UI units. A window shows it at a whole-number scale:
 /// 960x540 pixels at 2, 1440x810 at 3.
@@ -31,6 +37,7 @@ pub struct Playground {
     _kit: Script,
     _theme: Script,
     script: Script,
+    pages: Vec<Script>,
     pub world: World,
 }
 
@@ -45,12 +52,21 @@ impl Playground {
         });
         let kit = ecs.load("ui", sage_ui::WIDGETS).map_err(|e| e.0)?;
         let theme = ecs.load("theme", THEME).map_err(|e| e.0)?;
+        for (_, image) in assets::all().iter().map(|(p, id, i)| (p, (id, i))) {
+            let (id, i) = image;
+            sage_ui::register_image(&ecs, *id, [i.width, i.height]);
+        }
         let script = ecs.load("playground", SCRIPT).map_err(|e| e.0)?;
+        let mut pages = vec![];
+        for (name, source) in PAGES {
+            pages.push(ecs.load(name, source).map_err(|e| e.0)?);
+        }
         let p = Playground {
             ecs,
             _kit: kit,
             _theme: theme,
             script,
+            pages,
             world,
         };
         p.step();
@@ -64,22 +80,35 @@ impl Playground {
         }
     }
 
-    /// Evaluates a Python expression in the playground script's globals.
+    /// The names of the main script and every page script, merged: later
+    /// pages win over earlier ones for a name they share.
+    fn namespace<'py>(&self, py: Python<'py>) -> Bound<'py, pyo3::types::PyDict> {
+        let ns = self.script.globals(py).copy().expect("copy globals");
+        for page in &self.pages {
+            ns.update(page.globals(py).as_mapping())
+                .expect("merge globals");
+        }
+        ns
+    }
+
+    /// Evaluates a Python expression with the names of every script.
     pub fn eval<T: for<'py> FromPyObjectOwned<'py>>(&self, expr: &str) -> T {
         Python::attach(|py| {
             let code = std::ffi::CString::new(expr).unwrap();
-            py.eval(&code, Some(self.script.globals(py)), None)
+            let ns = self.namespace(py);
+            py.eval(&code, Some(&ns), None)
                 .unwrap_or_else(|e| panic!("{expr}: {}", sage_script::describe(py, &e)))
                 .extract()
                 .unwrap_or_else(|_| panic!("{expr}: wrong type"))
         })
     }
 
-    /// Runs Python statements in the playground script's globals.
+    /// Runs Python statements with the names of every script.
     pub fn run(&self, code: &str) {
         Python::attach(|py| {
             let code = std::ffi::CString::new(code).unwrap();
-            py.run(&code, Some(self.script.globals(py)), None)
+            let ns = self.namespace(py);
+            py.run(&code, Some(&ns), None)
                 .unwrap_or_else(|e| panic!("{}", sage_script::describe(py, &e)));
         });
     }
@@ -186,6 +215,13 @@ impl Playground {
         }
     }
 
+    /// Clicks the tab of the page called `name` and lets the page appear.
+    pub fn show_page(&self, name: &str) {
+        let i = self.eval::<usize>(&format!("page_names.index({name:?})"));
+        self.click(&format!("tab_buttons[{i}]"));
+        self.idle(3);
+    }
+
     /// The text of a label entity held in `var`.
     pub fn text(&self, var: &str) -> String {
         self.eval(&format!("text_of({var})"))
@@ -199,8 +235,17 @@ impl Playground {
     /// reference rasterizer (the same batch the GPU draws).
     pub fn render(&self, size: [u32; 2]) -> Image {
         let font = BitmapFont::builtin();
-        let batch = compose_ui(&self.ui_frame(), [size[0] as f32, size[1] as f32], &font);
-        let textures = [Image::solid(1, 1, [255; 4]), font.atlas.clone()];
+        let mut res = UiResources::new(2);
+        for (_, id, image) in assets::all() {
+            res.register_asset(id, image);
+        }
+        let batch = compose_ui(
+            &self.ui_frame(),
+            [size[0] as f32, size[1] as f32],
+            &font,
+            &mut res,
+        );
+        let textures = res.textures(&font);
         let px = rasterize(&batch, &textures, CLEAR, size);
         let mut img = Image::solid(size[0], size[1], [0, 0, 0, 255]);
         for (i, p) in px.iter().enumerate() {
@@ -221,5 +266,12 @@ impl UiApp for Playground {
 
     fn frame(&self) -> UiFrame {
         self.ui_frame()
+    }
+
+    fn images(&self) -> Vec<(u64, Image)> {
+        assets::all()
+            .into_iter()
+            .map(|(_, id, i)| (id, i))
+            .collect()
     }
 }

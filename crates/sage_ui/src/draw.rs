@@ -4,50 +4,8 @@
 
 use sage_core::host::{UI_ADVANCE, UI_GLYPH, UiDraw, UiFrame};
 
-use crate::layout::{Direction, Node, Rect, Tree, Widget, rgba};
-
-fn lighten(c: [u8; 4], by: u8) -> [u8; 4] {
-    [
-        c[0].saturating_add(by),
-        c[1].saturating_add(by),
-        c[2].saturating_add(by),
-        c[3],
-    ]
-}
-
-fn darken(c: [u8; 4], by: u8) -> [u8; 4] {
-    [
-        c[0].saturating_sub(by),
-        c[1].saturating_sub(by),
-        c[2].saturating_sub(by),
-        c[3],
-    ]
-}
-
-fn dim(c: [u8; 4]) -> [u8; 4] {
-    [c[0], c[1], c[2], c[3] / 2]
-}
-
-/// The fill of a node with its widget state applied.
-fn tinted_fill(n: &Node) -> [u8; 4] {
-    let base = rgba(n.fill);
-    if !n.enabled {
-        return dim(base);
-    }
-    if !matches!(
-        n.widget,
-        Widget::Button | Widget::Toggle | Widget::Slider | Widget::TextInput
-    ) {
-        return base;
-    }
-    if n.pressed {
-        darken(base, 24)
-    } else if n.hovered {
-        lighten(base, 16)
-    } else {
-        base
-    }
-}
+use crate::layout::{Direction, Fit, ImageNode, Node, Rect, Tree, Widget, rgba};
+use crate::style::{faded, resolve};
 
 /// A rectangle cut off at `clip`.
 fn rect(out: &mut Vec<UiDraw>, r: Rect, color: [u8; 4], clip: Option<Rect>) {
@@ -121,19 +79,141 @@ fn scrollbar(out: &mut Vec<UiDraw>, n: &Node) {
     rect(out, r, color, n.clip);
 }
 
-fn node(out: &mut Vec<UiDraw>, n: &Node) {
+fn clip4(c: Option<Rect>) -> Option<[f32; 4]> {
+    c.map(|c| [c.x, c.y, c.x + c.w, c.y + c.h])
+}
+
+/// The draw command for an image inside `r` (the node's content box).
+fn image(im: &ImageNode, r: Rect, fade: f32, clip: Option<Rect>) -> Option<UiDraw> {
+    let fs = im.frame_size();
+    let (cols, rows) = (im.cols.max(1), im.rows.max(1));
+    let (col, row) = (im.frame % cols, (im.frame / cols) % rows);
+    let uv = [
+        col as f32 / cols as f32,
+        row as f32 / rows as f32,
+        (col + 1) as f32 / cols as f32,
+        (row + 1) as f32 / rows as f32,
+    ];
+    let (mut pos, mut size) = ([r.x, r.y], [r.w, r.h]);
+    let natural = fs[0] > 0.0 && fs[1] > 0.0;
+    if natural {
+        let contain = (r.w / fs[0]).min(r.h / fs[1]);
+        let cover = (r.w / fs[0]).max(r.h / fs[1]);
+        let scale = match im.fit {
+            Fit::Stretch => None,
+            Fit::Contain => Some(contain),
+            Fit::Cover => Some(cover),
+            Fit::None => Some(1.0),
+            Fit::ScaleDown => Some(contain.min(1.0)),
+        };
+        if let Some(k) = scale {
+            size = [fs[0] * k, fs[1] * k];
+            pos = [r.x + (r.w - size[0]) / 2.0, r.y + (r.h - size[1]) / 2.0];
+        }
+    }
+    if size[0] <= 0.0 || size[1] <= 0.0 {
+        return None;
+    }
+    // Whatever sticks out of the box (cover, none) is cut off at the box.
+    let clip = Some(clip.map_or(r, |c| c.intersect(&r)));
+    Some(UiDraw::Image {
+        asset: im.asset,
+        pos,
+        size,
+        uv,
+        tint: faded(rgba(im.tint), fade),
+        clip: clip4(clip),
+    })
+}
+
+fn node(out: &mut Vec<UiDraw>, n: &Node, fade: f32) {
     let r = n.rect;
     if n.clip
         .is_some_and(|c| r.intersect(&c).w <= 0.0 || r.intersect(&c).h <= 0.0)
     {
         return;
     }
-    rect(out, r, tinted_fill(n), n.clip);
+    let col = n.shown.unwrap_or_else(|| resolve(n));
+    let c4 = |c: u32| faded(rgba(c), fade);
+    let fill = c4(col.fill);
+    let border = c4(col.border);
+    let clip = n.clip;
+    let rounded = n.radius > 0.0 && n.gradient.is_none();
+    // Shadow first, under everything.
+    if let Some(sh) = n.shadow {
+        out.push(UiDraw::Shadow {
+            pos: [r.x, r.y + sh.dy],
+            size: [r.w, r.h],
+            radius: n.radius,
+            blur: sh.blur,
+            color: c4(sh.color),
+            clip: clip4(clip),
+        });
+    }
+    // Fill and border. A rounded border is the border color's rounded
+    // rectangle with the fill's rounded rectangle inset inside it.
+    if let Some(g) = n.gradient {
+        let to = c4(g.to);
+        let colors = if g.vertical {
+            [fill, fill, to, to]
+        } else {
+            [fill, to, to, fill]
+        };
+        if fill[3] > 0 || to[3] > 0 {
+            out.push(UiDraw::Gradient {
+                pos: [r.x, r.y],
+                size: [r.w, r.h],
+                colors,
+                clip: clip4(clip),
+            });
+        }
+    } else if rounded {
+        let bw = n.border_width.min(r.w / 2.0).min(r.h / 2.0);
+        if bw > 0.0 && border[3] > 0 {
+            out.push(UiDraw::Round {
+                pos: [r.x, r.y],
+                size: [r.w, r.h],
+                radius: n.radius,
+                color: border,
+                clip: clip4(clip),
+            });
+            if fill[3] > 0 {
+                out.push(UiDraw::Round {
+                    pos: [r.x + bw, r.y + bw],
+                    size: [r.w - 2.0 * bw, r.h - 2.0 * bw],
+                    radius: (n.radius - bw).max(0.0),
+                    color: fill,
+                    clip: clip4(clip),
+                });
+            }
+        } else if fill[3] > 0 {
+            out.push(UiDraw::Round {
+                pos: [r.x, r.y],
+                size: [r.w, r.h],
+                radius: n.radius,
+                color: fill,
+                clip: clip4(clip),
+            });
+        }
+    } else {
+        rect(out, r, fill, clip);
+    }
+    if let Some(sl) = n.slice {
+        out.push(UiDraw::Slice {
+            asset: sl.asset,
+            pos: [r.x, r.y],
+            size: [r.w, r.h],
+            insets: sl.insets,
+            tint: c4(sl.tint),
+            clip: clip4(clip),
+        });
+    }
     let accent = if n.enabled {
         rgba(n.accent)
     } else {
-        dim(rgba(n.accent))
+        faded(rgba(n.accent), 0.5)
     };
+    let accent = faded(accent, fade);
     match n.widget {
         Widget::Slider | Widget::Meter if n.max != n.min => {
             let t = ((n.value - n.min) / (n.max - n.min)).clamp(0.0, 1.0);
@@ -141,7 +221,7 @@ fn node(out: &mut Vec<UiDraw>, n: &Node) {
                 w: (r.w * t).round(),
                 ..r
             };
-            rect(out, fill, accent, n.clip);
+            rect(out, fill, accent, clip);
         }
         Widget::Toggle if n.on => {
             let inset = (r.h.min(r.w) / 4.0).round().max(1.0);
@@ -151,15 +231,26 @@ fn node(out: &mut Vec<UiDraw>, n: &Node) {
                 w: r.w - 2.0 * inset,
                 h: r.h - 2.0 * inset,
             };
-            rect(out, mark, accent, n.clip);
+            rect(out, mark, accent, clip);
         }
         _ => {}
     }
-    if n.border_width > 0.0 {
-        outline(out, r, n.border_width, rgba(n.border), n.clip);
+    if let Some(im) = &n.image {
+        let content = Rect {
+            x: r.x + n.padding[0],
+            y: r.y + n.padding[1],
+            w: (r.w - n.padding[0] - n.padding[2]).max(0.0),
+            h: (r.h - n.padding[1] - n.padding[3]).max(0.0),
+        };
+        if let Some(d) = image(im, content, fade, clip) {
+            out.push(d);
+        }
+    }
+    if n.border_width > 0.0 && !(rounded && border[3] > 0) {
+        outline(out, r, n.border_width, border, clip);
     }
     if n.focused && n.enabled {
-        outline(out, r, 1.0, accent, n.clip);
+        outline(out, r, 1.0, accent, clip);
     }
     // A text input shows its text inside its own box, never outside it.
     let text_clip = if n.widget == Widget::TextInput {
@@ -168,11 +259,7 @@ fn node(out: &mut Vec<UiDraw>, n: &Node) {
         n.clip
     };
     if !n.lines.is_empty() {
-        let color = if n.enabled {
-            rgba(n.text_color)
-        } else {
-            dim(rgba(n.text_color))
-        };
+        let color = c4(col.text);
         let visible = text_clip.is_none_or(|c| c.w > 0.0 && c.h > 0.0);
         if visible {
             out.push(UiDraw::Text {
@@ -180,7 +267,7 @@ fn node(out: &mut Vec<UiDraw>, n: &Node) {
                 text: n.lines.clone(),
                 scale: n.text_scale,
                 color,
-                clip: text_clip.map(|c| [c.x, c.y, c.x + c.w, c.y + c.h]),
+                clip: clip4(text_clip),
             });
         }
     }
@@ -193,7 +280,7 @@ fn node(out: &mut Vec<UiDraw>, n: &Node) {
             w: s.max(1.0),
             h: UI_GLYPH[1] * s,
         };
-        rect(out, bar, rgba(n.text_color), text_clip);
+        rect(out, bar, c4(col.text), text_clip);
     }
 }
 
@@ -201,6 +288,7 @@ fn node(out: &mut Vec<UiDraw>, n: &Node) {
 /// scrollbar is drawn right after the last of its descendants.
 pub fn draw(tree: &Tree, size: [f32; 2]) -> UiFrame {
     let order = tree.draw_order();
+    let fades = tree.effective_fade();
     let mut pos = vec![usize::MAX; tree.nodes.len()];
     for (k, &i) in order.iter().enumerate() {
         pos[i] = k;
@@ -226,7 +314,7 @@ pub fn draw(tree: &Tree, size: [f32; 2]) -> UiFrame {
     }
     let mut out = vec![];
     for (k, &i) in order.iter().enumerate() {
-        node(&mut out, &tree.nodes[i]);
+        node(&mut out, &tree.nodes[i], fades[i]);
         for &bar in &bars_after[k] {
             scrollbar(&mut out, &tree.nodes[bar]);
         }
@@ -523,5 +611,302 @@ mod tests {
             panic!("no scrollbar drawn: {:?}", f.draws)
         };
         assert!(color[3] > 0, "{color:?}");
+    }
+
+    fn one(n: Node, w: f32, h: f32) -> Vec<UiDraw> {
+        let mut t = Tree { nodes: vec![n] };
+        layout(&mut t, [w, h]);
+        draw(&t, [w, h]).draws
+    }
+
+    fn img(fit: Fit) -> ImageNode {
+        ImageNode {
+            asset: 5,
+            fit,
+            tint: 0xffff_ffff,
+            size: [40.0, 20.0],
+            frame: 0,
+            cols: 1,
+            rows: 1,
+        }
+    }
+
+    type ImageParts<'a> = (
+        &'a [f32; 2],
+        &'a [f32; 2],
+        &'a [f32; 4],
+        &'a Option<[f32; 4]>,
+    );
+
+    fn the_image(draws: &[UiDraw]) -> ImageParts<'_> {
+        draws
+            .iter()
+            .find_map(|d| match d {
+                UiDraw::Image {
+                    pos,
+                    size,
+                    uv,
+                    clip,
+                    ..
+                } => Some((pos, size, uv, clip)),
+                _ => None,
+            })
+            .expect("an image draw")
+    }
+
+    #[test]
+    fn image_fit_modes_place_the_image_in_its_box() {
+        // A 100 x 100 box holding a 40 x 20 image.
+        let make = |fit| Node {
+            width: Size::Fixed(100.0),
+            height: Size::Fixed(100.0),
+            image: Some(img(fit)),
+            ..Node::default()
+        };
+        let d = one(make(Fit::Stretch), 200.0, 200.0);
+        let (pos, size, _, _) = the_image(&d);
+        assert_eq!((*pos, *size), ([0.0, 0.0], [100.0, 100.0]));
+        let d = one(make(Fit::Contain), 200.0, 200.0);
+        let (pos, size, _, _) = the_image(&d);
+        assert_eq!(
+            (*pos, *size),
+            ([0.0, 25.0], [100.0, 50.0]),
+            "scaled to the width, centered"
+        );
+        let d = one(make(Fit::Cover), 200.0, 200.0);
+        let (pos, size, _, clip) = the_image(&d);
+        assert_eq!(
+            (*pos, *size),
+            ([-50.0, 0.0], [200.0, 100.0]),
+            "scaled to the height, centered"
+        );
+        assert_eq!(
+            *clip,
+            Some([0.0, 0.0, 100.0, 100.0]),
+            "what sticks out is cut at the box"
+        );
+        let d = one(make(Fit::None), 200.0, 200.0);
+        let (pos, size, _, _) = the_image(&d);
+        assert_eq!((*pos, *size), ([30.0, 40.0], [40.0, 20.0]));
+        // ScaleDown never enlarges.
+        let d = one(make(Fit::ScaleDown), 200.0, 200.0);
+        assert_eq!(*the_image(&d).1, [40.0, 20.0]);
+        let mut small = make(Fit::ScaleDown);
+        small.width = Size::Fixed(20.0);
+        small.height = Size::Fixed(20.0);
+        let d = one(small, 200.0, 200.0);
+        assert_eq!(*the_image(&d).1, [20.0, 10.0], "shrunk to fit");
+    }
+
+    #[test]
+    fn a_sprite_sheet_frame_selects_its_part_of_the_image() {
+        let mut im = img(Fit::Stretch);
+        im.cols = 4;
+        im.rows = 2;
+        im.frame = 5; // column 1, row 1
+        let d = one(
+            Node {
+                image: Some(im),
+                ..Node::default()
+            },
+            100.0,
+            100.0,
+        );
+        assert_eq!(*the_image(&d).2, [0.25, 0.5, 0.5, 1.0]);
+        im.frame = 9; // wraps: 9 % 4 = column 1, (9 / 4) % 2 = row 0
+        let d = one(
+            Node {
+                image: Some(im),
+                ..Node::default()
+            },
+            100.0,
+            100.0,
+        );
+        assert_eq!(*the_image(&d).2, [0.25, 0.0, 0.5, 0.5]);
+    }
+
+    #[test]
+    fn rounded_fills_borders_shadows_gradients_and_slices_are_their_own_commands() {
+        let base = Node {
+            width: Size::Fixed(40.0),
+            height: Size::Fixed(20.0),
+            fill: 0x1020_30ff,
+            ..Node::default()
+        };
+        // A rounded fill is one Round.
+        let d = one(
+            Node {
+                radius: 4.0,
+                ..base.clone()
+            },
+            100.0,
+            100.0,
+        );
+        assert_eq!(
+            d,
+            vec![UiDraw::Round {
+                pos: [0.0, 0.0],
+                size: [40.0, 20.0],
+                radius: 4.0,
+                color: [0x10, 0x20, 0x30, 0xff],
+                clip: None
+            }]
+        );
+        // With a border: the border color's Round, then the fill's inset by the width.
+        let d = one(
+            Node {
+                radius: 4.0,
+                border: 0xff00_00ff,
+                border_width: 2.0,
+                ..base.clone()
+            },
+            100.0,
+            100.0,
+        );
+        assert_eq!(d.len(), 2);
+        assert!(
+            matches!(&d[0], UiDraw::Round { color, radius, .. } if *color == [255, 0, 0, 255] && *radius == 4.0)
+        );
+        assert!(
+            matches!(&d[1], UiDraw::Round { pos, size, radius, color, .. }
+            if *pos == [2.0, 2.0] && *size == [36.0, 16.0] && *radius == 2.0 && *color == [0x10, 0x20, 0x30, 0xff])
+        );
+        // A shadow comes first, offset down by dy.
+        let d = one(
+            Node {
+                radius: 3.0,
+                shadow: Some(crate::ShadowNode {
+                    blur: 5.0,
+                    dy: 2.0,
+                    color: 0x0000_00aa,
+                }),
+                ..base.clone()
+            },
+            100.0,
+            100.0,
+        );
+        assert!(matches!(&d[0], UiDraw::Shadow { pos, blur, color, .. }
+            if *pos == [0.0, 2.0] && *blur == 5.0 && *color == [0, 0, 0, 0xaa]));
+        assert!(matches!(&d[1], UiDraw::Round { .. }));
+        // A vertical gradient: fill on top, `to` at the bottom.
+        let d = one(
+            Node {
+                gradient: Some(crate::GradientNode {
+                    to: 0xff00_00ff,
+                    vertical: true,
+                }),
+                ..base.clone()
+            },
+            100.0,
+            100.0,
+        );
+        let top = [0x10, 0x20, 0x30, 0xff];
+        let bottom = [255, 0, 0, 255];
+        assert_eq!(
+            d,
+            vec![UiDraw::Gradient {
+                pos: [0.0, 0.0],
+                size: [40.0, 20.0],
+                colors: [top, top, bottom, bottom],
+                clip: None
+            }]
+        );
+        // A 9-slice background is drawn over the fill.
+        let d = one(
+            Node {
+                slice: Some(crate::SliceNode {
+                    asset: 9,
+                    insets: [3.0; 4],
+                    tint: 0xffff_ffff,
+                }),
+                ..base
+            },
+            100.0,
+            100.0,
+        );
+        assert!(matches!(&d[0], UiDraw::Rect { .. }));
+        assert!(matches!(&d[1], UiDraw::Slice { asset: 9, insets, .. } if *insets == [3.0; 4]));
+    }
+
+    #[test]
+    fn fade_scales_every_color_of_a_node_and_its_children() {
+        let mut t = Tree {
+            nodes: vec![
+                Node {
+                    id: 1,
+                    width: Size::Fixed(20.0),
+                    height: Size::Fixed(20.0),
+                    fill: 0xff00_00ff,
+                    fade: 0.5,
+                    ..Node::default()
+                },
+                Node {
+                    id: 2,
+                    parent: Some(0),
+                    width: Size::Fixed(10.0),
+                    height: Size::Fixed(10.0),
+                    fill: 0x00ff_00ff,
+                    text: "A".into(),
+                    ..Node::default()
+                },
+            ],
+        };
+        layout(&mut t, [50.0, 50.0]);
+        let f = draw(&t, [50.0, 50.0]);
+        let alphas: Vec<u8> = f
+            .draws
+            .iter()
+            .map(|d| match d {
+                UiDraw::Rect { color, .. } | UiDraw::Text { color, .. } => color[3],
+                other => panic!("{other:?}"),
+            })
+            .collect();
+        assert_eq!(
+            alphas,
+            vec![128, 128, 128],
+            "parent fill, child fill and child text"
+        );
+    }
+
+    #[test]
+    fn a_hidden_node_draws_nothing() {
+        let mut t = Tree {
+            nodes: vec![
+                Node {
+                    width: Size::Fixed(10.0),
+                    height: Size::Fixed(10.0),
+                    fill: 0xffff_ffff,
+                    ..Node::default()
+                },
+                Node {
+                    parent: Some(0),
+                    hidden: true,
+                    width: Size::Fixed(5.0),
+                    height: Size::Fixed(5.0),
+                    fill: 0xff00_00ff,
+                    ..Node::default()
+                },
+            ],
+        };
+        layout(&mut t, [50.0, 50.0]);
+        assert_eq!(draw(&t, [50.0, 50.0]).draws.len(), 1);
+    }
+
+    #[test]
+    fn a_shown_transition_state_overrides_the_resolved_colors() {
+        let mut n = Node {
+            width: Size::Fixed(10.0),
+            height: Size::Fixed(10.0),
+            fill: 0x0000_00ff,
+            ..Node::default()
+        };
+        n.shown = Some(crate::Resolved {
+            fill: 0x8080_80ff,
+            text: 0xffff_ffff,
+            border: 0,
+            fade: 0.0,
+        });
+        let d = one(n, 20.0, 20.0);
+        assert!(matches!(&d[0], UiDraw::Rect { color, .. } if *color == [0x80, 0x80, 0x80, 0xff]));
     }
 }

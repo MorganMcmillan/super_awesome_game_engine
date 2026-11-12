@@ -241,7 +241,7 @@ fn activate(tree: &mut Tree, i: usize, events: &mut Vec<UiEvent>) {
             target: id,
             kind: EventKind::Clicked,
         }),
-        Widget::Toggle => {
+        Widget::Toggle | Widget::Choice => {
             let on = !tree.nodes[i].on;
             tree.nodes[i].on = on;
             events.push(UiEvent {
@@ -267,8 +267,10 @@ pub fn update(tree: &mut Tree, st: &mut UiState, input: &UiInput) -> Vec<UiEvent
     let focus_before = st.focus;
 
     // Forget ids that no longer exist or can no longer be used.
+    let live = tree.live();
     let usable = |tree: &Tree, id: u64| {
-        find(tree, id).is_some_and(|i| tree.nodes[i].enabled && interactive(tree.nodes[i].widget))
+        find(tree, id)
+            .is_some_and(|i| live[i] && tree.nodes[i].enabled && interactive(tree.nodes[i].widget))
     };
     if !usable(tree, st.active) {
         st.active = 0;
@@ -324,7 +326,10 @@ pub fn update(tree: &mut Tree, st: &mut UiState, input: &UiInput) -> Vec<UiEvent
     if release {
         if let Some(i) = find(tree, st.active)
             && st.hot == st.active
-            && matches!(tree.nodes[i].widget, Widget::Button | Widget::Toggle)
+            && matches!(
+                tree.nodes[i].widget,
+                Widget::Button | Widget::Toggle | Widget::Choice
+            )
         {
             activate(tree, i, &mut events);
         }

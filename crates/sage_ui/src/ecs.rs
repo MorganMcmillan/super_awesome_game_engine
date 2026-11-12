@@ -27,7 +27,11 @@ use sage_ecs_py::{Ecs, StableIdC};
 use sage_scene::StringTable;
 
 use crate::interact::{EventKind, UiInput, UiState, update};
-use crate::layout::{Align, Direction, Justify, Node, Size, Tree, Widget, layout};
+use crate::layout::{
+    Align, Direction, Fit, GradientNode, ImageNode, Justify, Node, ShadowNode, Size, SliceNode,
+    Tree, Widget, layout,
+};
+use crate::style::{Resolved, States, Variant, ease, resolve};
 
 macro_rules! ui_component {
     ($(#[$m:meta])* $name:ident { $($f:ident : $t:ty),* $(,)? }) => {
@@ -117,6 +121,63 @@ ui_component!(UiSlider {
     step: f32
 });
 
+ui_component!(
+    /// An image in the node (`<img>`): `asset` is an `AssetId` (see
+    /// `ui.asset(path)` in the kit), `fit` 0 stretch, 1 contain, 2 cover,
+    /// 3 none, 4 scale-down, `tint` multiplies its colors. A sprite sheet
+    /// has `cols` by `rows` frames (0 means 1) and shows `frame`.
+    UiImage { asset: u64, fit: u32, tint: u32, frame: u32, cols: u32, rows: u32 }
+);
+ui_component!(
+    /// A 9-slice image drawn as the node's background; the insets are in
+    /// image pixels.
+    UiSlice { asset: u64, left: f32, top: f32, right: f32, bottom: f32, tint: u32 }
+);
+ui_component!(
+    /// Decoration: corner `radius`, a soft shadow (`shadow_blur` 0 for
+    /// none), a two-color gradient from the fill to `grad_to` (`grad_dir` 0
+    /// none, 1 down, 2 across), and `fade` from 0 opaque to 1 invisible,
+    /// which multiplies down the tree.
+    UiDecor {
+        radius: f32,
+        shadow_blur: f32,
+        shadow_dy: f32,
+        shadow_color: u32,
+        grad_to: u32,
+        grad_dir: u32,
+        fade: f32,
+    }
+);
+ui_component!(
+    /// Style variants by state: the fill, text and border color each state
+    /// overrides (0 leaves it). Later states win: checked, focus, hover,
+    /// pressed, disabled. A button with no hover variant lightens, one with
+    /// no pressed variant darkens, and a disabled one is dimmed.
+    UiStates {
+        checked_fill: u32, checked_text: u32, checked_border: u32,
+        focus_fill: u32, focus_text: u32, focus_border: u32,
+        hover_fill: u32, hover_text: u32, hover_border: u32,
+        pressed_fill: u32, pressed_text: u32, pressed_border: u32,
+        disabled_fill: u32, disabled_text: u32, disabled_border: u32,
+    }
+);
+ui_component!(
+    /// Colors ease to a new state instead of jumping: each tick closes
+    /// `1 / ticks` of the remaining gap (so `ticks` is a time constant; the
+    /// color is within a few units of its target after about three times
+    /// that, and arrives exactly shortly after).
+    UiTransition { ticks: u32 }
+);
+ui_component!(
+    /// Computed: the colors a transition has reached.
+    UiShown { fill: u32, text: u32, border: u32, fade: f32 }
+);
+ui_component!(
+    /// `display: none` when `none` is 1: the node and its subtree take no
+    /// space, draw nothing and take no pointer or focus.
+    UiDisplay { none: u32 }
+);
+
 ui_component!(UiClicked { target: u64 });
 ui_component!(UiToggled {
     target: u64,
@@ -152,6 +213,17 @@ ui_component!(
     UiInteraction { hot: u64, active: u64, focus: u64, prev_down: u32, prev_nav: u32 }
 );
 
+/// The natural size of every image asset the UI may show, by `AssetId`.
+/// The host registers them as it loads images (`register_image`); layout
+/// uses them to size an image whose box is `auto`.
+#[derive(Default, Debug)]
+pub struct ImageSizes(pub BTreeMap<u64, [u32; 2]>);
+
+/// Tells the UI the pixel size of an image asset.
+pub fn register_image(ecs: &Ecs, asset: u64, size: [u32; 2]) {
+    ecs.ext::<ImageSizes>().borrow_mut().0.insert(asset, size);
+}
+
 const STATE_HOVERED: u32 = 1;
 const STATE_PRESSED: u32 = 2;
 const STATE_FOCUSED: u32 = 4;
@@ -167,6 +239,8 @@ struct Source {
     scroll: Option<UiScroll>,
     caret: Option<UiCaret>,
     label: Option<UiLabel>,
+    shown: Option<UiShown>,
+    transition: Option<u32>,
     text: String,
 }
 
@@ -182,7 +256,12 @@ fn entity_rows(world: &WorldRef) -> Vec<(u64, u64)> {
 /// Reads the entities into a tree in StableId order. `computed` keeps the
 /// stored hover, pressed and focused flags instead of leaving them for
 /// `update` to compute.
-fn build(world: &WorldRef, strings: &StringTable, computed: bool) -> (Tree, Vec<Source>) {
+fn build(
+    world: &WorldRef,
+    strings: &StringTable,
+    sizes: &ImageSizes,
+    computed: bool,
+) -> (Tree, Vec<Source>) {
     let rows = entity_rows(world);
     let index: BTreeMap<u64, usize> = rows.iter().enumerate().map(|(i, r)| (r.1, i)).collect();
     let mut tree = Tree::default();
@@ -204,6 +283,13 @@ fn build(world: &WorldRef, strings: &StringTable, computed: bool) -> (Tree, Vec<
         let scroll = e.try_get::<&UiScroll>(|s| *s);
         let caret = e.try_get::<&UiCaret>(|c| *c);
         let modal = e.try_get::<&UiModal>(|m| m.on != 0);
+        let image = e.try_get::<&UiImage>(|i| *i);
+        let slice = e.try_get::<&UiSlice>(|i| *i);
+        let decor = e.try_get::<&UiDecor>(|d| *d);
+        let states = e.try_get::<&UiStates>(|s| *s);
+        let transition = e.try_get::<&UiTransition>(|t| t.ticks);
+        let shown = e.try_get::<&UiShown>(|s| *s);
+        let display = e.try_get::<&UiDisplay>(|d| d.none != 0);
         let parent = unsafe { sys::ecs_get_parent(w, entity) };
         let mut n = Node {
             id: sid,
@@ -247,6 +333,63 @@ fn build(world: &WorldRef, strings: &StringTable, computed: bool) -> (Tree, Vec<
             n.caret = c.pos as usize;
         }
         n.modal = modal.unwrap_or(false);
+        n.hidden = display.unwrap_or(false);
+        if let Some(i) = image {
+            n.image = Some(ImageNode {
+                asset: i.asset,
+                fit: Fit::from_u32(i.fit),
+                tint: i.tint,
+                size: sizes
+                    .0
+                    .get(&i.asset)
+                    .map_or([0.0; 2], |s| [s[0] as f32, s[1] as f32]),
+                frame: i.frame,
+                cols: i.cols,
+                rows: i.rows,
+            });
+        }
+        if let Some(sl) = slice {
+            n.slice = Some(SliceNode {
+                asset: sl.asset,
+                insets: [sl.left, sl.top, sl.right, sl.bottom],
+                tint: sl.tint,
+            });
+        }
+        if let Some(d) = decor {
+            n.radius = d.radius;
+            n.fade = d.fade;
+            if d.shadow_blur > 0.0 {
+                n.shadow = Some(ShadowNode {
+                    blur: d.shadow_blur,
+                    dy: d.shadow_dy,
+                    color: d.shadow_color,
+                });
+            }
+            if d.grad_dir != 0 {
+                n.gradient = Some(GradientNode {
+                    to: d.grad_to,
+                    vertical: d.grad_dir == 1,
+                });
+            }
+        }
+        if let Some(s) = states {
+            let v = |fill, text, border| Variant { fill, text, border };
+            n.states = States {
+                checked: v(s.checked_fill, s.checked_text, s.checked_border),
+                focus: v(s.focus_fill, s.focus_text, s.focus_border),
+                hover: v(s.hover_fill, s.hover_text, s.hover_border),
+                pressed: v(s.pressed_fill, s.pressed_text, s.pressed_border),
+                disabled: v(s.disabled_fill, s.disabled_text, s.disabled_border),
+            };
+        }
+        if let Some(sh) = shown {
+            n.shown = Some(Resolved {
+                fill: sh.fill,
+                text: sh.text,
+                border: sh.border,
+                fade: sh.fade,
+            });
+        }
         if let Some(w) = widget {
             n.widget = Widget::from_u32(w.kind);
             n.enabled = w.enabled != 0;
@@ -277,6 +420,8 @@ fn build(world: &WorldRef, strings: &StringTable, computed: bool) -> (Tree, Vec<
             scroll,
             caret,
             label,
+            shown,
+            transition,
             text,
         });
     }
@@ -284,8 +429,8 @@ fn build(world: &WorldRef, strings: &StringTable, computed: bool) -> (Tree, Vec<
 }
 
 /// One tick of the UI: layout, interaction, then write back and emit.
-fn step(world: &WorldRef, strings: &RefCell<StringTable>) {
-    let (mut tree, sources) = build(world, &strings.borrow(), false);
+fn step(world: &WorldRef, strings: &RefCell<StringTable>, sizes: &RefCell<ImageSizes>) {
+    let (mut tree, sources) = build(world, &strings.borrow(), &sizes.borrow(), false);
     let screen = world.get::<&UiScreen>(|s| *s);
     layout(&mut tree, [screen.w, screen.h]);
 
@@ -370,6 +515,40 @@ fn step(world: &WorldRef, strings: &RefCell<StringTable>) {
             e.set(UiLabel { text: id });
         }
     }
+    // Transitions: ease the shown colors towards what the state resolves to.
+    // A node that has never been shown starts at its target (no animation on
+    // the first frame).
+    for (src, n) in sources.iter().zip(&tree.nodes) {
+        let Some(ticks) = src.transition else {
+            continue;
+        };
+        let target = resolve(&Node {
+            shown: None,
+            ..n.clone()
+        });
+        let next = match src.shown {
+            Some(old) => ease(
+                &Resolved {
+                    fill: old.fill,
+                    text: old.text,
+                    border: old.border,
+                    fade: old.fade,
+                },
+                &target,
+                ticks,
+            ),
+            None => target,
+        };
+        let shown = UiShown {
+            fill: next.fill,
+            text: next.text,
+            border: next.border,
+            fade: next.fade,
+        };
+        if src.shown != Some(shown) {
+            world.entity_from_id(src.entity).set(shown);
+        }
+    }
     world.set(UiInteraction {
         hot: state.hot,
         active: state.active,
@@ -404,7 +583,8 @@ fn step(world: &WorldRef, strings: &RefCell<StringTable>) {
 pub fn frame(world: &World, ecs: &Ecs) -> UiFrame {
     let screen = world.get::<&UiScreen>(|s| *s);
     let strings = ecs.strings();
-    let (mut tree, _) = build(&world.world(), &strings.borrow(), true);
+    let sizes = ecs.ext::<ImageSizes>();
+    let (mut tree, _) = build(&world.world(), &strings.borrow(), &sizes.borrow(), true);
     // Layout is pure and cheap, and gives each node its clip and wrapped
     // lines, which are not stored in components.
     layout(&mut tree, [screen.w, screen.h]);
@@ -416,6 +596,7 @@ fn install(
     phase: u64,
     parent: u64,
     strings: Rc<RefCell<StringTable>>,
+    sizes: Rc<RefCell<ImageSizes>>,
 ) -> Result<u64, String> {
     let world = unsafe { WorldRef::from_ptr(w) };
     let named = |parent: u64, name: &str| {
@@ -440,7 +621,7 @@ fn install(
         .run(move |mut it| {
             // Drain the iterator: the work is done over the whole world.
             while it.next() {}
-            step(&it.world(), &strings);
+            step(&it.world(), &strings, &sizes);
         });
     unsafe { sys::ecs_set_scope(w, prev) };
     Ok(module)
@@ -469,6 +650,13 @@ pub fn setup(world: &World, ecs: &Ecs) -> Result<(), String> {
         UiScroll => "sage::ui::Scroll",
         UiCaret => "sage::ui::Caret",
         UiModal => "sage::ui::Modal",
+        UiImage => "sage::ui::Image",
+        UiSlice => "sage::ui::Slice",
+        UiDecor => "sage::ui::Decor",
+        UiStates => "sage::ui::States",
+        UiTransition => "sage::ui::Transition",
+        UiShown => "sage::ui::Shown",
+        UiDisplay => "sage::ui::Display",
         UiSlider => "sage::ui::Slider",
         UiClicked => "sage::ui::Clicked",
         UiToggled => "sage::ui::Toggled",
@@ -497,15 +685,25 @@ pub fn setup(world: &World, ecs: &Ecs) -> Result<(), String> {
             } )*
         };
     }
-    inherit!(UiBox, UiFlow, UiPaint, UiTextStyle);
+    inherit!(
+        UiBox,
+        UiFlow,
+        UiPaint,
+        UiTextStyle,
+        UiDecor,
+        UiSlice,
+        UiStates,
+        UiTransition
+    );
     world.set(UiPointer::default());
     world.set(UiNav::default());
     world.set(UiTextEntry::default());
     world.set(UiScreen { w: 320.0, h: 180.0 });
     world.set(UiInteraction::default());
     let strings = ecs.strings();
+    let sizes = ecs.ext::<ImageSizes>();
     ecs.add_native_module("ui", move |w, phase, parent| {
-        install(w, phase, parent, strings.clone())
+        install(w, phase, parent, strings.clone(), sizes.clone())
     });
     Ok(())
 }

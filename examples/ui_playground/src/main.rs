@@ -1,8 +1,8 @@
 //! ```text
 //! ui_playground play   [--scale N]                      open the playground in a window
 //! ui_playground render [--out FILE.png] [--scale N]     write a screenshot (CPU render)
-//!                      [--accent ORANGE|TEAL|VIOLET] [--dialog]
-//! ui_playground smoke  [--frames N]                     open a hidden window, draw, check
+//!                      [--accent ORANGE|TEAL|VIOLET] [--dialog] [--page NAME]
+//! ui_playground smoke  [--frames N] [--page NAME]       open a hidden window, draw, check
 //! ```
 //! In the window: mouse, wheel and typing work; Tab and Shift+Tab move focus,
 //! Enter presses, arrows adjust sliders and move the caret, PageUp and
@@ -20,6 +20,7 @@ struct Args {
     scale: u32,
     accent: Option<String>,
     dialog: bool,
+    page: Option<String>,
     frames: u64,
 }
 
@@ -31,6 +32,7 @@ fn parse() -> Result<Args, String> {
         scale: 2,
         accent: None,
         dialog: false,
+        page: None,
         frames: 5,
     };
     while let Some(flag) = it.next() {
@@ -41,6 +43,7 @@ fn parse() -> Result<Args, String> {
             "--accent" => a.accent = Some(value("a name")?.to_uppercase()),
             "--frames" => a.frames = value("a number")?.parse().map_err(|_| "bad --frames")?,
             "--dialog" => a.dialog = true,
+            "--page" => a.page = Some(value("a name")?.to_uppercase()),
             other => return Err(format!("unknown flag {other}")),
         }
     }
@@ -67,6 +70,9 @@ fn run() -> Result<(), String> {
             if let Some(name) = &a.accent {
                 playground.run(&format!("T.apply(T.accents[{name:?}])"));
             }
+            if let Some(page) = &a.page {
+                playground.show_page(page);
+            }
             playground.idle(40);
             playground.hover(playground.center("primary"));
             if a.dialog {
@@ -79,6 +85,9 @@ fn run() -> Result<(), String> {
             println!("wrote {} ({w}x{h})", a.out);
         }
         "smoke" => {
+            if let Some(page) = &a.page {
+                playground.show_page(page);
+            }
             let mut options = WindowOptions::new("UI Playground (smoke)", pixels(2));
             options.hidden = true;
             options.max_frames = Some(a.frames);
@@ -88,6 +97,7 @@ fn run() -> Result<(), String> {
             // drawn in the primary orange: both must be on screen.
             let mut orange = 0usize;
             let mut dark = 0usize;
+            let mut magenta = 0usize;
             for y in 0..image.height {
                 for x in 0..image.width {
                     let p = image.pixel(x, y);
@@ -97,12 +107,20 @@ fn run() -> Result<(), String> {
                     if p[..3] == CLEAR[..3] {
                         dark += 1;
                     }
+                    if p[0] > 240 && p[1] < 10 && p[2] > 240 {
+                        magenta += 1;
+                    }
                 }
             }
             println!(
                 "{} frames, {} ticks, {}x{}: {orange} orange pixels, {dark} background pixels",
                 run.frames, run.ticks, image.width, image.height
             );
+            if magenta > 0 {
+                return Err(format!(
+                    "{magenta} magenta pixels: an image asset is missing"
+                ));
+            }
             if orange == 0 || dark == 0 {
                 return Err("the window did not draw the themed UI".into());
             }

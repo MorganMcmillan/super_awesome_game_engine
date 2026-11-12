@@ -330,6 +330,21 @@ impl Ecs {
         self.reg.strings.clone()
     }
 
+    /// A host-owned value of type `T` attached to this world, created with
+    /// `T::default()` on first use. Native modules share data with their host
+    /// through it (the UI's image sizes, for example). It is not hashed or
+    /// saved: keep simulation state in components.
+    pub fn ext<T: Default + 'static>(&self) -> Rc<RefCell<T>> {
+        let mut map = self.reg.ext.borrow_mut();
+        let entry = map
+            .entry(std::any::TypeId::of::<T>())
+            .or_insert_with(|| Rc::new(RefCell::new(T::default())) as Rc<dyn std::any::Any>);
+        entry
+            .clone()
+            .downcast::<RefCell<T>>()
+            .expect("the entry for a type holds that type")
+    }
+
     /// Interns `text` and returns its id (0 for the empty string).
     pub fn intern(&self, text: &str) -> u64 {
         self.reg.strings.borrow_mut().intern(text)

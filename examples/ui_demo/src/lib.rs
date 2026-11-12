@@ -10,7 +10,7 @@ use pyo3::prelude::*;
 use sage_assets::{BitmapFont, Image};
 use sage_core::host::UiFrame;
 use sage_ecs_py::Ecs;
-use sage_platform::sprite::{compose_ui, rasterize};
+use sage_platform::sprite::{UiResources, compose_ui, rasterize};
 use sage_script::Script;
 use sage_ui::ecs::{UiNav, UiPointer, UiScreen, UiTextEntry};
 
@@ -132,8 +132,14 @@ impl Demo {
     /// Renders the current UI into an image of `size` pixels.
     pub fn render(&self, size: [u32; 2]) -> Image {
         let font = BitmapFont::builtin();
-        let batch = compose_ui(&self.frame(), [size[0] as f32, size[1] as f32], &font);
-        let textures = [Image::solid(1, 1, [255; 4]), font.atlas.clone()];
+        let mut res = UiResources::new(2);
+        let batch = compose_ui(
+            &self.frame(),
+            [size[0] as f32, size[1] as f32],
+            &font,
+            &mut res,
+        );
+        let textures = res.textures(&font);
         let px = rasterize(&batch, &textures, [12, 14, 18, 255], size);
         let mut img = Image::solid(size[0], size[1], [0, 0, 0, 255]);
         for (i, p) in px.iter().enumerate() {

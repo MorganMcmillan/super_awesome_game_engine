@@ -91,6 +91,53 @@ pub enum UiDraw {
         color: [u8; 4],
         clip: Option<[f32; 4]>,
     },
+    /// An image asset (`AssetId`, the hash of its normalized path) stretched
+    /// over a rectangle. `uv` is the part of the image shown (`[u0, v0, u1,
+    /// v1]`, 0 to 1); `tint` multiplies its colors.
+    Image {
+        asset: u64,
+        pos: [f32; 2],
+        size: [f32; 2],
+        uv: [f32; 4],
+        tint: [u8; 4],
+        clip: Option<[f32; 4]>,
+    },
+    /// A 9-slice: the image's corners (`insets`: left, top, right, bottom, in
+    /// image pixels) keep their size, its edges and center stretch.
+    Slice {
+        asset: u64,
+        pos: [f32; 2],
+        size: [f32; 2],
+        insets: [f32; 4],
+        tint: [u8; 4],
+        clip: Option<[f32; 4]>,
+    },
+    /// A filled rectangle with rounded corners.
+    Round {
+        pos: [f32; 2],
+        size: [f32; 2],
+        radius: f32,
+        color: [u8; 4],
+        clip: Option<[f32; 4]>,
+    },
+    /// A soft shadow under a rounded rectangle: the rectangle grown by
+    /// `blur` on every side, fading to nothing at its edge.
+    Shadow {
+        pos: [f32; 2],
+        size: [f32; 2],
+        radius: f32,
+        blur: f32,
+        color: [u8; 4],
+        clip: Option<[f32; 4]>,
+    },
+    /// A rectangle with a color at each corner (top-left, top-right,
+    /// bottom-right, bottom-left), blended across it.
+    Gradient {
+        pos: [f32; 2],
+        size: [f32; 2],
+        colors: [[u8; 4]; 4],
+        clip: Option<[f32; 4]>,
+    },
 }
 
 /// A UI snapshot for presentation: draw commands back to front, in UI units

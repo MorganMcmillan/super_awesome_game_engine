@@ -13,6 +13,7 @@ from sage.ui import (
     Caret,
     Changed,
     Clicked,
+    Display,
     Label,
     Modal,
     Paint,
@@ -38,7 +39,9 @@ class Driver:
     dialog: Entity = None  # the open dialog, if any
     cancel: Entity = None  # its buttons
     ok: Entity = None
-    request: sage.u8 = 0  # 1 open, 2 close; handled after the tick's events
+    request: sage.u8 = 0  # 1 open, 2 close, 3 show page `arg`; handled after the tick's events
+    arg: sage.u8 = 0
+    page: sage.u8 = 0  # the page being shown
 
 
 @component
@@ -88,9 +91,33 @@ def labeled_row(parent, text, value):
 app = ui.add(T.Surface)
 bar = ui.add(T.Bar, app)
 ui.add(T.Title, bar, text="UI PLAYGROUND")
-ui.add(T.Muted, bar, text="FLECS ENTITIES / STYLE PREFABS / PYTHON")
+nav = ui.add(T.Row, bar, gap=3)
 cols = ui.add(T.Cols, app)
 left, middle, right = (ui.add(T.Column, cols) for _ in range(3))
+
+# ---- pages --------------------------------------------------------------------
+# Each page is a root under `app`; only one is shown (Display none hides the
+# rest). Page scripts loaded after this one call `world.add_page(name)`.
+page_roots = [cols]
+tab_buttons = [ui.add(T.Tab, nav, text="BASICS")]
+tab_buttons[0].set(Toggle(1))
+tab_sids = {tab_buttons[0].sid: 0}
+page_names = ["BASICS"]
+
+
+def add_page(name):
+    """A new page: returns its root (a row of columns, hidden until its tab
+    is chosen)."""
+    root = ui.add(T.Cols, app, display=False)
+    tab = ui.add(T.Tab, nav, text=name)
+    tab_sids[tab.sid] = len(page_roots)
+    page_names.append(name)
+    page_roots.append(root)
+    tab_buttons.append(tab)
+    return root
+
+
+world.add_page = add_page
 
 # -- column 1: buttons, toggles ---------------------------------------------------
 buttons = card(left, "BUTTONS")
@@ -169,7 +196,7 @@ ui.add(T.Para, keys, text="TAB MOVES FOCUS. ENTER PRESSES. ARROWS ADJUST. PAGEUP
 
 # ---- behavior ---------------------------------------------------------------
 driver = world.entity()
-driver.set(Driver(None, None, None, 0))
+driver.set(Driver(None, None, None, 0, 0, 0))
 
 
 def dialog_buttons():
@@ -210,6 +237,11 @@ def on_click(c: Clicked):
 
 @world.observer(Toggled)
 def on_toggle(t: Toggled):
+    if t.target in tab_sids:
+        d = driver.get(Driver)
+        d.request = 3
+        d.arg = tab_sids[t.target]
+        return
     if t.target == extras.sid:
         w = extra_button.get(Widget).copy()
         w.enabled = t.on
@@ -241,12 +273,18 @@ def advance(s: Slider):
 def apply_request(e: Entity, d: Driver):
     # Opening and closing happen here, after the tick's events have been
     # delivered, so an observer never changes the tree it is reacting to.
-    kind, dialog, cancel, ok = d.request, d.dialog, d.cancel, d.ok
+    kind, dialog, cancel, ok, arg = d.request, d.dialog, d.cancel, d.ok, d.arg
     if kind == 0:
+        return
+    if kind == 3:
+        for i, (page, tab) in enumerate(zip(page_roots, tab_buttons)):
+            page.set(Display(0 if i == arg else 1))
+            tab.set(Toggle(1 if i == arg else 0))
+        e.set(Driver(dialog, cancel, ok, 0, 0, arg))
         return
     if kind == 1 and dialog is None:
         dialog, cancel, ok = open_dialog()
     elif kind == 2 and dialog is not None:
         dialog.destruct()
         dialog = cancel = ok = None
-    e.set(Driver(dialog, cancel, ok, 0))
+    e.set(Driver(dialog, cancel, ok, 0, 0, d.page))

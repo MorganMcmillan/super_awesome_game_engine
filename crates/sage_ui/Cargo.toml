@@ -14,4 +14,5 @@ sage_scene.workspace = true
 
 [dev-dependencies]
 pyo3.workspace = true
+sage_assets.workspace = true
 sage_script.workspace = true

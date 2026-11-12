@@ -574,3 +574,187 @@ fn the_caret_is_a_component_and_edits_happen_at_it() {
         "heXlo"
     );
 }
+
+const STYLED: &str = r#"
+import sage
+from sage.ui import Rect, Decor, Display, Shown, States, Transition, Paint, Image
+
+ui = world.ui
+ui.start()
+root = ui.panel(width=200, height=120, gap=4, padding=4)
+logo = ui.image(root, "art/logo.png")
+fitted = ui.image(root, "art/logo.png", width=60, height=60, fit="contain")
+sheet = ui.image(root, "art/sheet.png", cols=4, rows=2, frame=5)
+card = ui.panel(root, width=40, height=20, fill=0x204060ff, radius=4, shadow=(3, 1, 0x000000a0),
+                gradient=(0x102030ff, "down"), fade=0.25)
+slice_bg = ui.panel(root, width=30, height=30, slice=("art/frame.png", (3, 3, 3, 3)))
+hidden = ui.panel(root, width=50, height=50, display=False)
+after = ui.panel(root, width=10, height=10)
+btn = ui.button(root, "Go", fill=0x404040ff, transition=4,
+                states={"hover": {"fill": 0xe8741aff}, "disabled": {"fill": 0x222222ff}})
+
+def rect_of(e):
+    r = e.get(Rect)
+    return (r.x, r.y, r.w, r.h)
+def shown_fill():
+    return btn.get(Shown).fill if btn.has(Shown) else None
+"#;
+
+fn styled() -> Ui {
+    let world = World::new();
+    let ecs = Ecs::new(&world, 3, "game").unwrap();
+    sage_ui::setup(&world, &ecs).unwrap();
+    for (path, size) in [("art/logo.png", [32, 16]), ("art/sheet.png", [64, 32])] {
+        sage_ui::register_image(&ecs, sage_assets::AssetId::of_path(path).0, size);
+    }
+    let kit = ecs.load("ui", sage_ui::WIDGETS).unwrap();
+    let script = ecs.load("game", STYLED).unwrap();
+    Ui {
+        ecs,
+        script,
+        _kit: kit,
+        world,
+    }
+}
+
+#[test]
+fn the_kit_hashes_asset_paths_like_the_asset_store_does() {
+    let ui = styled();
+    for path in [
+        "art/logo.png",
+        "./art/logo.png",
+        "art\\logo.png",
+        "a.png",
+        "ü/β.png",
+    ] {
+        let want = sage_assets::AssetId::of_path(path).0;
+        assert_eq!(
+            ui.eval::<u64>(&format!("ui.asset({path:?})")),
+            want,
+            "{path}"
+        );
+    }
+}
+
+#[test]
+fn images_size_themselves_and_fit_inside_boxes() {
+    let ui = styled();
+    ui.tick();
+    let r = |e: &str| ui.eval::<(f32, f32, f32, f32)>(&format!("rect_of({e})"));
+    assert_eq!(
+        (r("logo").2, r("logo").3),
+        (32.0, 16.0),
+        "an auto-sized image is its natural size"
+    );
+    assert_eq!(
+        (r("sheet").2, r("sheet").3),
+        (16.0, 16.0),
+        "a sheet's size is one frame"
+    );
+    assert_eq!((r("fitted").2, r("fitted").3), (60.0, 60.0));
+    let f = sage_ui::frame(&ui.world, &ui.ecs);
+    let images: Vec<_> = f
+        .draws
+        .iter()
+        .filter_map(|d| match d {
+            UiDraw::Image { pos, size, uv, .. } => Some((*pos, *size, *uv)),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(images.len(), 3);
+    // Contain: a 32x16 image in a 60x60 box is 60x30, centered vertically.
+    let (pos, size, _) = images[1];
+    assert_eq!((size, pos[1] - r("fitted").1), ([60.0, 30.0], 15.0));
+    // Frame 5 of a 4x2 sheet: column 1, row 1.
+    assert_eq!(images[2].2, [0.25, 0.5, 0.5, 1.0]);
+}
+
+#[test]
+fn decor_slices_and_display_none_reach_the_draw_list() {
+    let ui = styled();
+    ui.tick();
+    let f = sage_ui::frame(&ui.world, &ui.ecs);
+    assert!(
+        f.draws
+            .iter()
+            .any(|d| matches!(d, UiDraw::Shadow { blur, .. } if *blur == 3.0))
+    );
+    assert!(
+        f.draws
+            .iter()
+            .any(|d| matches!(d, UiDraw::Gradient { colors, .. }
+            if colors[0][3] == 0xbf && colors[2][3] == 0xbf)),
+        "a faded gradient has 75% alpha: {:?}",
+        f.draws
+    );
+    assert!(
+        f.draws
+            .iter()
+            .any(|d| matches!(d, UiDraw::Slice { insets, .. } if *insets == [3.0; 4]))
+    );
+    // The hidden panel takes no space: `after` sits right below the slice panel.
+    let r = |e: &str| ui.eval::<(f32, f32, f32, f32)>(&format!("rect_of({e})"));
+    assert_eq!(r("hidden"), (0.0, 0.0, 0.0, 0.0));
+    assert_eq!(r("after").1, r("slice_bg").1 + 30.0 + 4.0);
+    // Showing it pushes the next one down.
+    Python::attach(|py| {
+        py.run(c"hidden.set(Display(0))", Some(ui.script.globals(py)), None)
+            .unwrap();
+    });
+    ui.tick();
+    assert_eq!(r("after").1, r("slice_bg").1 + 30.0 + 4.0 + 50.0 + 4.0);
+}
+
+#[test]
+fn state_variants_and_transitions_ease_in_whole_ticks() {
+    let ui = styled();
+    ui.tick();
+    ui.tick();
+    assert_eq!(
+        ui.eval::<u32>("shown_fill()"),
+        0x4040_40ff,
+        "starts at its resting fill"
+    );
+    // Hover the button: the fill eases to the hover variant (time constant 4).
+    let (x, y) = ui.eval::<(f32, f32)>("(lambda r: (r.x + 2, r.y + 2))(btn.get(Rect))");
+    let mut seen = vec![];
+    for _ in 0..60 {
+        ui.pointer(x, y, false);
+        ui.tick();
+        seen.push(ui.eval::<u32>("shown_fill()"));
+    }
+    assert_ne!(seen[0], 0xe874_1aff, "not there yet after one tick");
+    assert_eq!(*seen.last().unwrap(), 0xe874_1aff, "arrived: {seen:x?}");
+    let red = |c: u32| (c >> 24) as i32;
+    assert!(
+        seen.windows(2).all(|w| red(w[1]) >= red(w[0])),
+        "the red channel rises monotonically: {seen:x?}"
+    );
+    // The frame draws the shown color, not the jump.
+    let f = sage_ui::frame(&ui.world, &ui.ecs);
+    assert!(
+        f.draws
+            .iter()
+            .any(|d| matches!(d, UiDraw::Rect { color, .. } if *color == [0xe8, 0x74, 0x1a, 0xff]))
+    );
+    // It is state: it hashes and a save game restores it mid-transition.
+    ui.no_pointer();
+    ui.tick();
+    let text = ui.ecs.save_game(Default::default());
+    let at_save = ui.hash();
+    let later: Vec<u64> = (0..6)
+        .map(|_| {
+            ui.tick();
+            ui.hash()
+        })
+        .collect();
+    let other = styled();
+    other.tick();
+    other.ecs.load_game(&text, Policy::Strict).unwrap();
+    assert_eq!(other.hash(), at_save);
+    for (i, want) in later.iter().enumerate() {
+        other.no_pointer();
+        other.tick();
+        assert_eq!(other.hash(), *want, "tick {} after loading", i + 1);
+    }
+}

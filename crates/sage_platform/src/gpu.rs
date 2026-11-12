@@ -20,7 +20,9 @@ use sdl3::gpu::{
 use sdl3::pixels::Color;
 use sdl3::video::Window;
 
-use crate::sprite::{self, FONT, ScaleMode, Skin, SpriteBatch, TextureId, Vertex, WHITE};
+use crate::sprite::{
+    self, FONT, ScaleMode, Skin, SpriteBatch, TextureId, UiResources, Vertex, WHITE,
+};
 use crate::{BACKGROUND, Renderer};
 
 const VERT_SPV: &[u8] = include_bytes!("../shaders/sprite.vert.spv");
@@ -45,6 +47,9 @@ pub struct GpuRenderer {
     sampler: Sampler,
     textures: Vec<Texture<'static>>,
     font: BitmapFont,
+    /// Image assets and generated corner and shadow textures for UI frames.
+    ui_res: Option<UiResources>,
+    ui_uploaded: usize,
     pub skin: Skin,
     pub mode: ScaleMode,
     vertex_buffer: Option<(sdl3::gpu::Buffer, u32)>,
@@ -94,6 +99,8 @@ impl GpuRenderer {
             sampler,
             textures: vec![],
             font: font.clone(),
+            ui_res: None,
+            ui_uploaded: 0,
             skin: Skin::default(),
             mode: ScaleMode::PixelPerfect,
             vertex_buffer: None,
@@ -428,7 +435,7 @@ impl GpuRenderer {
     /// for the viewport (the window's size in pixels).
     fn present(
         &mut self,
-        make: impl FnOnce(&GpuRenderer, [f32; 2]) -> SpriteBatch,
+        make: impl FnOnce(&mut GpuRenderer, [f32; 2]) -> Result<SpriteBatch, String>,
     ) -> Result<(), String> {
         let window = self.window.take().ok_or("this renderer has no window")?;
         let result = (|| {
@@ -441,7 +448,13 @@ impl GpuRenderer {
             };
             let format = self.device.get_swapchain_texture_format(&window);
             let viewport = [swapchain.width() as f32, swapchain.height() as f32];
-            let batch = make(self, viewport);
+            let batch = match make(self, viewport) {
+                Ok(b) => b,
+                Err(e) => {
+                    cmd.cancel();
+                    return Err(e);
+                }
+            };
             self.record(&cmd, &swapchain, format, &batch)?;
             cmd.submit().map_err(err)
         })();
@@ -449,14 +462,67 @@ impl GpuRenderer {
         result
     }
 
+    /// The UI's image assets and generated textures, created on first use
+    /// with ids after the textures this renderer already has.
+    fn ui_resources(&mut self) -> UiResources {
+        self.ui_res
+            .take()
+            .unwrap_or_else(|| UiResources::new(self.textures.len() as u32))
+    }
+
+    /// Uploads the textures `res` created since the last upload, so a batch
+    /// composed with it can be drawn. Their ids are `base + index`, which
+    /// only lines up while nothing else adds textures in between.
+    fn upload_ui(&mut self, res: &UiResources) -> Result<(), String> {
+        for img in &res.images()[self.ui_uploaded..] {
+            let id = self.add_texture(img)?;
+            let want = self.ui_uploaded as u32 + res_base(res);
+            if id.0 != want {
+                return Err(format!(
+                    "UI texture {want} landed in slot {}: another texture was added in between",
+                    id.0
+                ));
+            }
+            self.ui_uploaded += 1;
+        }
+        Ok(())
+    }
+
+    /// Makes an image available to the UI under `asset` (an `AssetId`).
+    pub fn register_ui_image(&mut self, asset: u64, image: &Image) -> Result<(), String> {
+        let mut res = self.ui_resources();
+        res.register_asset(asset, image.clone());
+        let r = self.upload_ui(&res);
+        self.ui_res = Some(res);
+        r
+    }
+
+    /// Composes a UI frame for a viewport of pixels, uploading any textures
+    /// it needed. Used for the window and for read-back screenshots.
+    pub fn compose_ui_batch(
+        &mut self,
+        frame: &UiFrame,
+        viewport: [f32; 2],
+    ) -> Result<SpriteBatch, String> {
+        let mut res = self.ui_resources();
+        let batch = sprite::compose_ui(frame, viewport, &self.font, &mut res);
+        let uploaded = self.upload_ui(&res);
+        self.ui_res = Some(res);
+        uploaded.map(|()| batch)
+    }
+
     /// Draws a UI frame (`sprite::compose_ui`) into the window.
     pub fn draw_ui(&mut self, frame: &UiFrame) -> Result<(), String> {
-        self.present(|r, viewport| sprite::compose_ui(frame, viewport, &r.font))
+        self.present(|r, viewport| r.compose_ui_batch(frame, viewport))
     }
+}
+
+fn res_base(res: &UiResources) -> u32 {
+    res.base()
 }
 
 impl Renderer for GpuRenderer {
     fn draw(&mut self, frame: &Frame) -> Result<(), String> {
-        self.present(|r, viewport| sprite::compose(frame, viewport, r.mode, &r.font, &r.skin))
+        self.present(|r, viewport| Ok(sprite::compose(frame, viewport, r.mode, &r.font, &r.skin)))
     }
 }

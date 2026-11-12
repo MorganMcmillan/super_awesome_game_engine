@@ -15,6 +15,8 @@
 
 use sage_core::host::{UI_ADVANCE, UI_GLYPH, UI_LINE_HEIGHT};
 
+use crate::style::{Resolved, States};
+
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum Size {
     /// As large as the content needs.
@@ -118,6 +120,10 @@ pub enum Widget {
     /// A read-only bar showing a value from its `Slider` component (a
     /// progress bar). The pointer passes through it and it takes no focus.
     Meter,
+    /// A button that stays selected: it flips its `Toggle` like a check box
+    /// but draws no mark, so its `checked` style variant is the whole look.
+    /// The base of radio buttons and tabs.
+    Choice,
 }
 
 impl Widget {
@@ -129,6 +135,7 @@ impl Widget {
             4 => Widget::TextInput,
             5 => Widget::Block,
             6 => Widget::Meter,
+            7 => Widget::Choice,
             _ => Widget::None,
         }
     }
@@ -136,7 +143,7 @@ impl Widget {
     pub fn focusable(self) -> bool {
         matches!(
             self,
-            Widget::Button | Widget::Toggle | Widget::Slider | Widget::TextInput
+            Widget::Button | Widget::Toggle | Widget::Choice | Widget::Slider | Widget::TextInput
         )
     }
 }
@@ -176,6 +183,82 @@ pub fn rgba(c: Color) -> [u8; 4] {
     c.to_be_bytes()
 }
 
+/// How an image fits the box it is in.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum Fit {
+    /// Stretched to the box.
+    #[default]
+    Stretch,
+    /// As large as fits inside the box, keeping its proportions.
+    Contain,
+    /// As small as covers the box, keeping its proportions (cut off).
+    Cover,
+    /// Its natural size, centered.
+    None,
+    /// `Contain`, but never larger than its natural size.
+    ScaleDown,
+}
+
+impl Fit {
+    pub fn from_u32(v: u32) -> Fit {
+        match v {
+            1 => Fit::Contain,
+            2 => Fit::Cover,
+            3 => Fit::None,
+            4 => Fit::ScaleDown,
+            _ => Fit::Stretch,
+        }
+    }
+}
+
+/// An image shown inside a node (`<img>`).
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct ImageNode {
+    pub asset: u64,
+    pub fit: Fit,
+    pub tint: Color,
+    /// The whole image's natural size in pixels (0 when unknown).
+    pub size: [f32; 2],
+    /// A sprite sheet: `cols` by `rows` equal frames, `frame` is shown.
+    pub frame: u32,
+    pub cols: u32,
+    pub rows: u32,
+}
+
+impl ImageNode {
+    /// The natural size of one frame.
+    pub fn frame_size(&self) -> [f32; 2] {
+        [
+            self.size[0] / self.cols.max(1) as f32,
+            self.size[1] / self.rows.max(1) as f32,
+        ]
+    }
+}
+
+/// A 9-slice image drawn as the node's background.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct SliceNode {
+    pub asset: u64,
+    /// Left, top, right, bottom, in image pixels.
+    pub insets: [f32; 4],
+    pub tint: Color,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct ShadowNode {
+    pub blur: f32,
+    pub dy: f32,
+    pub color: Color,
+}
+
+/// A two-color gradient over the node's fill: from `fill` to `to`, down
+/// (`vertical`) or across.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct GradientNode {
+    pub to: Color,
+    pub vertical: bool,
+}
+
 #[derive(Clone, Debug)]
 pub struct Node {
     /// The StableId of the entity this node stands for.
@@ -198,6 +281,21 @@ pub struct Node {
     pub fill: Color,
     pub border: Color,
     pub border_width: f32,
+    /// Corner radius of the fill and border, in UI units.
+    pub radius: f32,
+    pub shadow: Option<ShadowNode>,
+    pub gradient: Option<GradientNode>,
+    pub image: Option<ImageNode>,
+    pub slice: Option<SliceNode>,
+    /// 0 opaque to 1 invisible; multiplies down the tree.
+    pub fade: f32,
+    /// `display: none`: the node and its subtree take no space, draw nothing
+    /// and take no pointer or focus.
+    pub hidden: bool,
+    /// Style variants by state.
+    pub states: States,
+    /// The colors a transition has reached, when the node has one.
+    pub shown: Option<Resolved>,
     /// Slider fill, toggle mark and focus ring.
     pub accent: Color,
     pub text: String,
@@ -257,6 +355,15 @@ impl Default for Node {
             fill: 0,
             border: 0,
             border_width: 0.0,
+            radius: 0.0,
+            shadow: None,
+            gradient: None,
+            image: None,
+            slice: None,
+            fade: 0.0,
+            hidden: false,
+            states: States::default(),
+            shown: None,
             accent: 0xffff_ffff,
             text: String::new(),
             text_color: 0xffff_ffff,
@@ -296,9 +403,52 @@ pub struct Tree {
 const MAX_DEPTH: usize = 64;
 
 impl Tree {
+    /// Which nodes take part: not `hidden` themselves or through an ancestor.
+    pub fn live(&self) -> Vec<bool> {
+        fn walk(t: &Tree, memo: &mut [Option<bool>], i: usize, depth: usize) -> bool {
+            if let Some(v) = memo[i] {
+                return v;
+            }
+            if depth > MAX_DEPTH {
+                return true;
+            }
+            let parent = t.nodes[i].parent.filter(|&p| p < t.nodes.len() && p != i);
+            let v = !t.nodes[i].hidden && parent.is_none_or(|p| walk(t, memo, p, depth + 1));
+            memo[i] = Some(v);
+            v
+        }
+        let mut memo = vec![None; self.nodes.len()];
+        (0..self.nodes.len())
+            .map(|i| walk(self, &mut memo, i, 0))
+            .collect()
+    }
+
+    /// Each node's fade including its ancestors': a node 50% faded inside a
+    /// parent 50% faded is 75% faded.
+    pub fn effective_fade(&self) -> Vec<f32> {
+        (0..self.nodes.len())
+            .map(|i| {
+                let mut keep = 1.0f32;
+                let mut at = Some(i);
+                for _ in 0..=MAX_DEPTH {
+                    let Some(a) = at else { break };
+                    keep *= 1.0 - self.nodes[a].fade.clamp(0.0, 1.0);
+                    at = self.nodes[a]
+                        .parent
+                        .filter(|&p| p < self.nodes.len() && p != a);
+                }
+                1.0 - keep
+            })
+            .collect()
+    }
+
     pub fn children(&self) -> Vec<Vec<usize>> {
+        let live = self.live();
         let mut out = vec![vec![]; self.nodes.len()];
         for (i, n) in self.nodes.iter().enumerate() {
+            if !live[i] {
+                continue;
+            }
             if let Some(p) = n.parent
                 && p < self.nodes.len()
                 && p != i
@@ -310,7 +460,9 @@ impl Tree {
     }
 
     pub fn roots(&self) -> Vec<usize> {
+        let live = self.live();
         (0..self.nodes.len())
+            .filter(|&i| live[i])
             .filter(|&i| {
                 self.nodes[i]
                     .parent
@@ -467,8 +619,9 @@ impl Pass<'_> {
             _ => n.text.clone(),
         };
         let text = text_size(&shown, n.text_scale);
-        let w = content[0].max(text[0]) + n.padding[0] + n.padding[2];
-        let h = content[1].max(text[1]) + n.padding[1] + n.padding[3];
+        let img = n.image.map_or([0.0; 2], |i| i.frame_size());
+        let w = content[0].max(text[0]).max(img[0]) + n.padding[0] + n.padding[2];
+        let h = content[1].max(text[1]).max(img[1]) + n.padding[1] + n.padding[3];
         self.intrinsic[i] = [w, h];
         [w, h]
     }
@@ -1054,5 +1207,84 @@ mod tests {
         };
         let none = a.intersect(&far);
         assert!(none.w == 0.0 || none.h == 0.0);
+    }
+
+    #[test]
+    fn a_hidden_node_and_its_subtree_take_no_space_and_are_not_live() {
+        let mut t = Tree {
+            nodes: vec![
+                Node {
+                    gap: 5.0,
+                    ..node(None)
+                },
+                fixed(Some(0), 10.0, 10.0),
+                Node {
+                    hidden: true,
+                    ..fixed(Some(0), 10.0, 30.0)
+                },
+                fixed(Some(2), 4.0, 4.0),
+                fixed(Some(0), 10.0, 10.0),
+            ],
+        };
+        layout(&mut t, [100.0, 100.0]);
+        assert_eq!(t.live(), vec![true, true, false, false, true]);
+        assert_eq!(
+            t.nodes[0].rect.h, 25.0,
+            "10 + gap 5 + 10: the hidden one is skipped"
+        );
+        assert_eq!(t.nodes[4].rect.y, 15.0);
+        assert!(!t.draw_order().contains(&2) && !t.draw_order().contains(&3));
+        // Showing it again brings it back into the flow.
+        t.nodes[2].hidden = false;
+        layout(&mut t, [100.0, 100.0]);
+        assert_eq!(t.nodes[0].rect.h, 10.0 + 5.0 + 30.0 + 5.0 + 10.0);
+    }
+
+    #[test]
+    fn an_auto_sized_image_is_its_natural_frame_size() {
+        let img = |cols, rows| ImageNode {
+            asset: 1,
+            fit: Fit::Stretch,
+            tint: 0xffff_ffff,
+            size: [64.0, 32.0],
+            frame: 0,
+            cols,
+            rows,
+        };
+        let mut t = Tree {
+            nodes: vec![Node {
+                image: Some(img(1, 1)),
+                padding: [2.0; 4],
+                ..node(None)
+            }],
+        };
+        layout(&mut t, [200.0, 200.0]);
+        assert_eq!((t.nodes[0].rect.w, t.nodes[0].rect.h), (68.0, 36.0));
+        // A 4x2 sprite sheet: each frame is 16x16.
+        t.nodes[0].image = Some(img(4, 2));
+        layout(&mut t, [200.0, 200.0]);
+        assert_eq!((t.nodes[0].rect.w, t.nodes[0].rect.h), (20.0, 20.0));
+        // A fixed size wins, as for any node.
+        t.nodes[0].width = Size::Fixed(50.0);
+        layout(&mut t, [200.0, 200.0]);
+        assert_eq!(t.nodes[0].rect.w, 50.0);
+    }
+
+    #[test]
+    fn fade_multiplies_down_the_tree() {
+        let t = Tree {
+            nodes: vec![
+                Node {
+                    fade: 0.5,
+                    ..node(None)
+                },
+                Node {
+                    fade: 0.5,
+                    ..node(Some(0))
+                },
+                node(Some(1)),
+            ],
+        };
+        assert_eq!(t.effective_fade(), vec![0.5, 0.75, 0.75]);
     }
 }

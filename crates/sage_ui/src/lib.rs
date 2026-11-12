@@ -15,13 +15,16 @@ pub mod draw;
 pub mod ecs;
 pub mod interact;
 pub mod layout;
+pub mod style;
 
 pub use draw::draw;
-pub use ecs::{frame, setup};
+pub use ecs::{ImageSizes, frame, register_image, setup};
 pub use interact::{EventKind, UiEvent, UiInput, UiState, update};
 pub use layout::{
-    Align, Color, Direction, Justify, Node, Rect, Size, Tree, Widget, layout, text_size,
+    Align, Color, Direction, Fit, GradientNode, ImageNode, Justify, Node, Rect, ShadowNode, Size,
+    SliceNode, Tree, Widget, layout, text_size,
 };
+pub use style::{Resolved, States, Variant};
 
 /// The widget kit: prefabs for panel, text, button, toggle, slider and text
 /// input, and `world.ui` to build them. Load it as a script after [`setup`]:

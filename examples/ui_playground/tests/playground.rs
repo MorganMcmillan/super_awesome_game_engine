@@ -347,3 +347,275 @@ fn the_playground_is_deterministic_and_survives_a_save_game() {
     assert!(c.eval::<bool>("driver.get(Driver).dialog is not None"));
     let _ = (Policy::Lenient, NAV_END);
 }
+
+// ---- the STYLE page ------------------------------------------------------------
+
+fn draws(p: &Playground) -> Vec<UiDraw> {
+    p.ui_frame().draws
+}
+
+#[test]
+fn the_style_page_is_hidden_until_its_tab_is_chosen() {
+    let p = Playground::new().unwrap();
+    assert_eq!(
+        p.rect("style_root"),
+        [0.0; 4],
+        "a hidden page takes no space"
+    );
+    assert!(!texts(&p).contains(&"IMAGES".to_string()));
+    assert!(texts(&p).contains(&"BUTTONS".to_string()));
+    p.show_page("STYLE");
+    assert!(texts(&p).contains(&"IMAGES".to_string()));
+    assert!(
+        !texts(&p).contains(&"BUTTONS".to_string()),
+        "the first page is hidden now"
+    );
+    assert_eq!(p.eval::<u32>("tab_buttons[1].get(Toggle).on"), 1);
+    assert_eq!(p.eval::<u32>("tab_buttons[0].get(Toggle).on"), 0);
+    // Clicking the selected tab keeps it selected.
+    p.click("tab_buttons[1]");
+    assert_eq!(p.eval::<u32>("tab_buttons[1].get(Toggle).on"), 1);
+    // And back.
+    p.show_page("BASICS");
+    assert!(texts(&p).contains(&"BUTTONS".to_string()));
+    assert_eq!(p.rect("style_root"), [0.0; 4]);
+}
+
+#[test]
+fn images_render_with_their_pixels_not_the_missing_asset_magenta() {
+    let p = Playground::new().unwrap();
+    p.show_page("STYLE");
+    let img = p.render(SIZE);
+    let [x, y, w, h] = p.rect("logo");
+    assert_eq!((w, h), (32.0, 32.0), "the logo is its natural size");
+    // The diamond's center is orange-red, its corner is transparent over a card.
+    let center = pixel(&img, [x + w / 2.0, y + h / 2.0]);
+    assert!(
+        center[0] > 150 && center[1] < 150 && center[2] < 80,
+        "{center:?}"
+    );
+    let corner = pixel(&img, [x + 1.0, y + 1.0]);
+    assert_eq!(
+        corner,
+        [0x1B, 0x17, 0x14],
+        "transparent pixels show the card"
+    );
+    let mut magenta = 0;
+    for y in 0..SIZE[1] {
+        for x in 0..SIZE[0] {
+            let p = img.pixel(x, y);
+            if p[0] > 240 && p[1] < 10 && p[2] > 240 {
+                magenta += 1;
+            }
+        }
+    }
+    assert_eq!(magenta, 0, "no image is missing");
+}
+
+#[test]
+fn fit_modes_place_the_logo_in_its_boxes() {
+    let p = Playground::new().unwrap();
+    p.show_page("STYLE");
+    type Placed = ([f32; 2], [f32; 2], Option<[f32; 4]>);
+    let images: Vec<Placed> = draws(&p)
+        .into_iter()
+        .filter_map(|d| match d {
+            UiDraw::Image {
+                pos,
+                size,
+                clip,
+                asset,
+                ..
+            } if asset == sage_assets::AssetId::of_path("art/logo.png").0 => {
+                Some((pos, size, clip))
+            }
+            _ => None,
+        })
+        .collect();
+    // The natural one, then contain, cover and none in 40 x 28 boxes.
+    assert_eq!(images.len(), 4);
+    assert_eq!(images[1].1, [28.0, 28.0], "contain");
+    assert_eq!(images[2].1, [40.0, 40.0], "cover");
+    assert_eq!(images[3].1, [32.0, 32.0], "none keeps the natural size");
+    let clip = images[2].2.expect("cover is cut at its box");
+    assert_eq!((clip[2] - clip[0], clip[3] - clip[1]), (40.0, 28.0));
+}
+
+#[test]
+fn the_sprite_sheet_player_advances_a_system_driven_frame() {
+    let p = Playground::new().unwrap();
+    p.show_page("STYLE");
+    let frame = |p: &Playground| p.eval::<u32>("spinner.get(Image).frame");
+    let first = frame(&p);
+    p.idle(8);
+    assert_eq!(frame(&p), (first + 1) % 4, "one frame every 8 ticks");
+    p.idle(8 * 4);
+    assert_eq!(frame(&p), (first + 1) % 4, "and it wraps after four");
+    // The frame the draw list shows is the frame in the component.
+    let uv = draws(&p)
+        .into_iter()
+        .find_map(|d| match d {
+            UiDraw::Image { uv, asset, .. }
+                if asset == sage_assets::AssetId::of_path("art/spinner.png").0 =>
+            {
+                Some(uv)
+            }
+            _ => None,
+        })
+        .unwrap();
+    assert_eq!(uv[0], frame(&p) as f32 / 4.0);
+}
+
+#[test]
+fn boxes_have_rounded_corners_shadows_gradients_and_a_slice_frame() {
+    let p = Playground::new().unwrap();
+    p.show_page("STYLE");
+    let d = draws(&p);
+    assert!(
+        d.iter()
+            .any(|d| matches!(d, UiDraw::Round { radius, .. } if *radius == 6.0)),
+        "rounded"
+    );
+    assert!(
+        d.iter()
+            .any(|d| matches!(d, UiDraw::Shadow { blur, .. } if *blur == 5.0)),
+        "shadow"
+    );
+    assert!(
+        d.iter().any(|d| matches!(d, UiDraw::Gradient { .. })),
+        "gradient"
+    );
+    assert!(
+        d.iter()
+            .any(|d| matches!(d, UiDraw::Slice { asset, insets, .. }
+            if *asset == sage_assets::AssetId::of_path("art/frame.png").0 && *insets == [4.0; 4])),
+        "slice"
+    );
+    // The gradient really runs orange to teal in the picture.
+    let img = p.render(SIZE);
+    let [x, y, w, h] = p.rect("gradient");
+    let left = pixel(&img, [x + 2.0, y + h - 2.0]);
+    let right = pixel(&img, [x + w - 3.0, y + h - 2.0]);
+    assert!(
+        left[0] > 200 && left[2] < 120,
+        "orange at the left: {left:?}"
+    );
+    assert!(
+        right[1] > 150 && right[0] < 120,
+        "teal at the right: {right:?}"
+    );
+}
+
+#[test]
+fn the_fade_slider_fades_a_group_and_its_children() {
+    let p = Playground::new().unwrap();
+    p.show_page("STYLE");
+    let btn_alpha = |p: &Playground| {
+        draws(p)
+            .into_iter()
+            .find_map(|d| match d {
+                UiDraw::Text { text, color, .. } if text == "CHILDREN FADE TOO" => Some(color[3]),
+                _ => None,
+            })
+            .unwrap()
+    };
+    assert_eq!(btn_alpha(&p), 255);
+    let [x, y, w, h] = p.rect("fade_slider");
+    p.click_at([x + w * 0.5, y + h / 2.0]); // 5 of 10: half faded
+    assert_eq!(p.eval::<f32>("fade_group.get(Decor).fade"), 0.5);
+    let half = btn_alpha(&p);
+    assert!((126..=129).contains(&half), "{half}");
+    p.click_at([x + w - 1.0, y + h / 2.0]); // fully faded
+    assert_eq!(btn_alpha(&p), 0);
+}
+
+#[test]
+fn display_none_hides_and_shows_a_note_and_the_layout_follows() {
+    let p = Playground::new().unwrap();
+    p.show_page("STYLE");
+    assert_eq!(p.rect("note"), [0.0; 4], "hidden: no space");
+    let below_before = p.rect("fading")[3];
+    p.click("extra_box");
+    p.idle(2);
+    let [_, _, w, h] = p.rect("note");
+    assert!(w > 0.0 && h > 0.0, "shown");
+    assert!(
+        p.rect("fading")[3] > below_before,
+        "the card grew to hold it"
+    );
+    assert!(texts(&p).iter().any(|t| t.contains("THIS NOTE")));
+    p.click("extra_box");
+    p.idle(2);
+    assert_eq!(p.rect("note"), [0.0; 4]);
+    assert!(!texts(&p).iter().any(|t| t.contains("THIS NOTE")));
+}
+
+#[test]
+fn hover_transitions_differ_by_time_constant_and_a_disabled_button_keeps_its_variant() {
+    let p = Playground::new().unwrap();
+    p.show_page("STYLE");
+    let fill = |p: &Playground, var: &str| p.eval::<u32>(&format!("{var}.get(Shown).fill"));
+    let hover = |name: &str| {
+        let c = p.center(&format!("speeds[{name:?}]"));
+        p.hover(c);
+    };
+    let before = fill(&p, "speeds['SLOW 16']");
+    // After two ticks of hovering, the fast one is much nearer its target.
+    hover("SLOW 16");
+    p.hover(p.center("speeds['FAST 2']"));
+    p.hover(p.center("speeds['FAST 2']"));
+    let slow = fill(&p, "speeds['SLOW 16']");
+    let fast = fill(&p, "speeds['FAST 2']");
+    let target = 0xF28C_28FFu32;
+    let dist = |c: u32| (c >> 24).abs_diff(target >> 24);
+    assert!(
+        dist(fast) < dist(slow),
+        "fast {fast:x} vs slow {slow:x} (rest {before:x})"
+    );
+    // INSTANT jumps in one tick.
+    p.hover(p.center("speeds['INSTANT']"));
+    assert_eq!(fill(&p, "speeds['INSTANT']"), target);
+    // The disabled button is not hoverable and uses its own variant.
+    p.hover(p.center("disabled_state"));
+    assert_eq!(fill_of(&p, "disabled_state"), [0x1B, 0x17, 0x14, 0xFF]);
+    // A checked choice uses its checked variant, and unchecked ones do not.
+    let (a, b) = (fill_of(&p, "choice_a"), fill_of(&p, "choice_b"));
+    assert_eq!(a, [0xF2, 0x8C, 0x28, 0xFF]);
+    assert_ne!(b, [0x2E, 0xC4, 0xB6, 0xFF]);
+    p.click("choice_b");
+    p.hover([1.0, 1.0]); // away from it: hover would lighten the fill
+    assert_eq!(fill_of(&p, "choice_b"), [0x2E, 0xC4, 0xB6, 0xFF]);
+}
+
+fn fill_of(p: &Playground, var: &str) -> [u8; 4] {
+    let [x, y, _, _] = p.rect(var);
+    let img = p.render(SIZE);
+    let q = img.pixel((x * SCALE as f32) as u32 + 5, (y * SCALE as f32) as u32 + 5);
+    [q[0], q[1], q[2], q[3]]
+}
+
+#[test]
+fn the_style_page_survives_a_save_game_mid_transition() {
+    let session = |p: &Playground| {
+        p.show_page("STYLE");
+        p.hover(p.center("speeds['SLOW 16']"));
+        p.idle(3);
+    };
+    let (a, b) = (Playground::new().unwrap(), Playground::new().unwrap());
+    session(&a);
+    session(&b);
+    assert_eq!(hash(&a), hash(&b));
+    let text = a.ecs.save_game(Default::default());
+    let c = Playground::new().unwrap();
+    c.ecs.load_game(&text, Policy::Strict).unwrap();
+    assert_eq!(hash(&c), hash(&a));
+    for _ in 0..30 {
+        a.idle(1);
+        c.idle(1);
+        assert_eq!(hash(&c), hash(&a));
+    }
+    assert_eq!(
+        c.render(SIZE).to_png_bytes().unwrap(),
+        a.render(SIZE).to_png_bytes().unwrap()
+    );
+}

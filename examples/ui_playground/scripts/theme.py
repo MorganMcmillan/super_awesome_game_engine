@@ -10,10 +10,11 @@
 #   Panel   ->  Surface, Bar, Cols, Column, Card, Row, Backdrop, Dialog
 #   Text    ->  Title, Heading, Body, Muted, Para, Chip, Badge
 #   Button  ->  Primary, Secondary, Ghost, Danger, Item, Swatch
+#   Choice  ->  Tab (selected = the accent color, through a `checked` style variant)
 #   Toggle  ->  Switch        Slider -> Track        Meter -> Gauge
 #   TextInput -> Field
 
-from sage.ui import Box, Flow, Paint, Screen, TextStyle, Widget
+from sage.ui import Box, Flow, Paint, Screen, States, TextStyle, Widget
 
 ui = world.ui
 COLUMN, ROW = ui.COLUMN, ui.ROW
@@ -65,7 +66,7 @@ class Theme:
         fill = ui.fill()
         # Layout.
         self.Surface = make("Surface", ui.Panel, size(fill, fill), flow(gap=6, pad=(6, 6, 6, 6)))
-        self.Bar = make("Bar", ui.Panel, size(fill, 20), flow(ROW, CENTER, BETWEEN, pad=(8, 0, 8, 0)))
+        self.Bar = make("Bar", ui.Panel, size(fill, 20), flow(ROW, CENTER, BETWEEN, 12, (8, 0, 8, 0)))
         self.Cols = make("Cols", ui.Panel, size(fill, fill), flow(ROW, STRETCH, START, gap=6))
         self.Column = make("Column", ui.Panel, size(fill, fill), flow(COLUMN, STRETCH, START, gap=6))
         self.Card = make("Card", ui.Panel, size(fill, None), flow(COLUMN, STRETCH, START, 4, (6, 5, 6, 6)))
@@ -84,6 +85,7 @@ class Theme:
         for name in ("Primary", "Secondary", "Ghost", "Danger", "Swatch"):
             setattr(self, name, make(name, ui.Button, size(fill, None)))
         self.Item = make("Item", ui.Button, size(fill, None))
+        self.Tab = make("Tab", ui.Choice, size(None, None))
         self.Switch = make("Switch", ui.Toggle)
         self.Track = make("Track", ui.Slider)
         self.Gauge = make("Gauge", ui.Meter)
@@ -136,6 +138,9 @@ class Theme:
         text(self.Danger, TEXT)
         text(self.Swatch, INK)
         text(self.Item, TEXT)
+        paint(self.Tab, BG2, EDGE, 1)
+        text(self.Tab, MUTED)
+        self.Tab.set(States(checked_fill=accent, checked_text=INK, hover_text=TEXT))
         text(self.Field, TEXT)
 
 

@@ -45,6 +45,26 @@ class Clicked(Component):
     def __init__(self, target: u64 = ...) -> None: ...
 
 
+class Decor(Component):
+    """Native component `sage.ui.Decor`."""
+
+    radius: f32
+    shadow_blur: f32
+    shadow_dy: f32
+    shadow_color: u32
+    grad_to: u32
+    grad_dir: u32
+    fade: f32
+    def __init__(self, radius: f32 = ..., shadow_blur: f32 = ..., shadow_dy: f32 = ..., shadow_color: u32 = ..., grad_to: u32 = ..., grad_dir: u32 = ..., fade: f32 = ...) -> None: ...
+
+
+class Display(Component):
+    """Native component `sage.ui.Display`."""
+
+    none: u32
+    def __init__(self, none: u32 = ...) -> None: ...
+
+
 class Flow(Component):
     """Native component `sage.ui.Flow`."""
 
@@ -64,6 +84,18 @@ class Focused(Component):
 
     target: u64
     def __init__(self, target: u64 = ...) -> None: ...
+
+
+class Image(Component):
+    """Native component `sage.ui.Image`."""
+
+    asset: u64
+    fit: u32
+    tint: u32
+    frame: u32
+    cols: u32
+    rows: u32
+    def __init__(self, asset: u64 = ..., fit: u32 = ..., tint: u32 = ..., frame: u32 = ..., cols: u32 = ..., rows: u32 = ...) -> None: ...
 
 
 class Interaction(Component):
@@ -144,6 +176,28 @@ class Scroll(Component):
     def __init__(self, offset: f32 = ...) -> None: ...
 
 
+class Shown(Component):
+    """Native component `sage.ui.Shown`."""
+
+    fill: u32
+    text: u32
+    border: u32
+    fade: f32
+    def __init__(self, fill: u32 = ..., text: u32 = ..., border: u32 = ..., fade: f32 = ...) -> None: ...
+
+
+class Slice(Component):
+    """Native component `sage.ui.Slice`."""
+
+    asset: u64
+    left: f32
+    top: f32
+    right: f32
+    bottom: f32
+    tint: u32
+    def __init__(self, asset: u64 = ..., left: f32 = ..., top: f32 = ..., right: f32 = ..., bottom: f32 = ..., tint: u32 = ...) -> None: ...
+
+
 class Slider(Component):
     """Native component `sage.ui.Slider`."""
 
@@ -152,6 +206,27 @@ class Slider(Component):
     max: f32
     step: f32
     def __init__(self, value: f32 = ..., min: f32 = ..., max: f32 = ..., step: f32 = ...) -> None: ...
+
+
+class States(Component):
+    """Native component `sage.ui.States`."""
+
+    checked_fill: u32
+    checked_text: u32
+    checked_border: u32
+    focus_fill: u32
+    focus_text: u32
+    focus_border: u32
+    hover_fill: u32
+    hover_text: u32
+    hover_border: u32
+    pressed_fill: u32
+    pressed_text: u32
+    pressed_border: u32
+    disabled_fill: u32
+    disabled_text: u32
+    disabled_border: u32
+    def __init__(self, checked_fill: u32 = ..., checked_text: u32 = ..., checked_border: u32 = ..., focus_fill: u32 = ..., focus_text: u32 = ..., focus_border: u32 = ..., hover_fill: u32 = ..., hover_text: u32 = ..., hover_border: u32 = ..., pressed_fill: u32 = ..., pressed_text: u32 = ..., pressed_border: u32 = ..., disabled_fill: u32 = ..., disabled_text: u32 = ..., disabled_border: u32 = ...) -> None: ...
 
 
 class Submitted(Component):
@@ -197,6 +272,13 @@ class Toggled(Component):
     target: u64
     on: u32
     def __init__(self, target: u64 = ..., on: u32 = ...) -> None: ...
+
+
+class Transition(Component):
+    """Native component `sage.ui.Transition`."""
+
+    ticks: u32
+    def __init__(self, ticks: u32 = ...) -> None: ...
 
 
 class Widget(Component):

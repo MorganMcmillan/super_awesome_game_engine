@@ -10,7 +10,7 @@
 use std::collections::{BTreeMap, VecDeque};
 use std::time::{Duration, Instant};
 
-use sage_assets::{BitmapFont, Image};
+use sage_assets::Image;
 use sage_core::TICK_DT;
 use sage_core::host::{
     NAV_ACCEPT, NAV_BACKSPACE, NAV_DELETE, NAV_DOWN, NAV_END, NAV_HOME, NAV_LEFT, NAV_NEXT,
@@ -22,7 +22,7 @@ use sdl3::mouse::MouseButton;
 
 use crate::WindowOptions;
 use crate::gpu::GpuRenderer;
-use crate::sprite::{compose_ui, ui_view};
+use crate::sprite::ui_view;
 
 /// One tick of UI input, as the window loop samples it.
 #[derive(Clone, Debug, Default, PartialEq)]
@@ -47,6 +47,11 @@ pub trait UiApp {
     fn tick(&mut self, input: &UiTickInput);
     /// What to draw now. Reads only.
     fn frame(&self) -> UiFrame;
+    /// Image assets the UI draws, by `AssetId`; read once when the window
+    /// opens.
+    fn images(&self) -> Vec<(u64, Image)> {
+        vec![]
+    }
 }
 
 #[derive(Debug)]
@@ -200,10 +205,12 @@ pub fn run_ui_windowed<A: UiApp>(app: &mut A, options: &WindowOptions) -> Result
     let window = builder.build().map_err(|e| e.to_string())?;
     let mut gpu = GpuRenderer::new(window.clone())
         .map_err(|e| format!("the UI window needs the GPU renderer: {e}"))?;
+    for (id, image) in app.images() {
+        gpu.register_ui_image(id, &image)?;
+    }
     video.text_input().start(&window);
     let mut events = sdl.event_pump().map_err(|e| e.to_string())?;
 
-    let font = BitmapFont::builtin();
     let tick_len = Duration::from_secs_f32(TICK_DT);
     let (mut last, mut accumulator) = (Instant::now(), Duration::ZERO);
     let (mut frames, mut ticks) = (0u64, 0u64);
@@ -249,7 +256,7 @@ pub fn run_ui_windowed<A: UiApp>(app: &mut A, options: &WindowOptions) -> Result
         if let Some(max) = options.max_frames
             && frames >= max
         {
-            let batch = compose_ui(&frame, viewport, &font);
+            let batch = gpu.compose_ui_batch(&frame, viewport)?;
             last_frame = Some(gpu.render_to_image(&batch, [pw, ph])?);
             break;
         }

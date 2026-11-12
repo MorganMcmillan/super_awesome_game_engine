@@ -29,12 +29,49 @@
 
 import sage
 from sage import OnUpdate
-from sage.ui import Absolute, Box, Caret, Flow, Label, Paint, Rect, Scroll, Slider, TextStyle, Toggle, Widget, ZIndex
+from sage.ui import (
+    Absolute,
+    Box,
+    Caret,
+    Decor,
+    Display,
+    Flow,
+    Label,
+    Paint,
+    Rect,
+    Scroll,
+    Slider,
+    States,
+    TextStyle,
+    Toggle,
+    Transition,
+    Widget,
+    ZIndex,
+)
+from sage.ui import Image as ImageC
+from sage.ui import Slice as SliceC
 
 COLUMN, ROW = 0, 1
 START, CENTER, END, STRETCH = 0, 1, 2, 3
 SPACE_BETWEEN = 3
-NONE, BUTTON, TOGGLE, SLIDER, TEXT_INPUT, BLOCK, METER = 0, 1, 2, 3, 4, 5, 6
+NONE, BUTTON, TOGGLE, SLIDER, TEXT_INPUT, BLOCK, METER, CHOICE = 0, 1, 2, 3, 4, 5, 6, 7
+
+
+def asset(path):
+    """The `AssetId` of an image path: the 64-bit FNV-1a hash of the path with
+    `\\` turned into `/` and a leading `./` removed, as `sage_assets` computes
+    it. The host must also register the image (its pixels and its size)."""
+    p = path.replace("\\", "/")
+    while p.startswith("./"):
+        p = p[2:]
+    h = 0xCBF29CE484222325
+    for byte in p.encode("utf-8"):
+        h = ((h ^ byte) * 0x100000001B3) & 0xFFFFFFFFFFFFFFFF
+    return h
+
+
+FIT = {"stretch": 0, "contain": 1, "cover": 2, "none": 3, "scale-down": 4}
+STATES = ("checked", "focus", "hover", "pressed", "disabled")
 
 
 class Fill:
@@ -72,6 +109,7 @@ def _update(entity, cls, **fields):
 
 class Ui:
     fill = staticmethod(Fill)
+    asset = staticmethod(asset)
     # Layout constants, for `direction=`, `align=` and `justify=`.
     COLUMN, ROW = COLUMN, ROW
     START, CENTER, END, STRETCH, SPACE_BETWEEN = START, CENTER, END, STRETCH, SPACE_BETWEEN
@@ -92,6 +130,9 @@ class Ui:
         slider = world.prefab("UiSlider", base=panel)
         slider.set(Widget(SLIDER, 1, 0, 0)).set(Paint(0x2A2F3AFF, 0x00000000, 0.0, 0x6AA9FFFF))
         slider.set(Slider(0.0, 0.0, 1.0, 0.0)).set(Box(2, 1.0, 1, 8.0))
+        choice = world.prefab("UiChoice", base=label)
+        choice.set(Widget(CHOICE, 1, 0, 0)).set(Toggle(0)).set(Paint(0x3A4150FF, 0x00000000, 0.0, 0x6AA9FFFF))
+        choice.set(Flow(COLUMN, START, START, 0.0, 4.0, 3.0, 4.0, 3.0))
         text_input = world.prefab("UiTextInput", base=label)
         text_input.set(Widget(TEXT_INPUT, 1, 0, 0)).set(Paint(0x14171CFF, 0x3A4150FF, 1.0, 0x6AA9FFFF))
         text_input.set(Flow(COLUMN, START, START, 0.0, 3.0, 3.0, 3.0, 3.0)).set(Caret(0))
@@ -99,7 +140,9 @@ class Ui:
         meter.set(Widget(METER, 1, 0, 0)).set(Paint(0x2A2F3AFF, 0x00000000, 0.0, 0x6AA9FFFF))
         meter.set(Slider(0.0, 0.0, 1.0, 0.0)).set(Box(2, 1.0, 1, 6.0))
         # The prefabs. Extend them like any prefab: world.prefab("Danger", base=ui.Button).
-        self.Panel, self.Text, self.Button = panel, label, button
+        image = world.prefab("UiImage", base=panel)
+        image.set(ImageC(0, 0, 0xFFFFFFFF, 0, 1, 1))
+        self.Panel, self.Text, self.Button, self.Image, self.Choice = panel, label, button, image, choice
         self.Toggle, self.Slider, self.TextInput, self.Meter = toggle, slider, text_input, meter
 
     def start(self, phase=OnUpdate):
@@ -110,7 +153,10 @@ class Ui:
     def add(self, prefab, parent=None, *, name=None, sid=None, width=None, height=None,
             direction=None, align=None, justify=None, gap=None, padding=None,
             fill=None, border=None, border_width=None, accent=None,
-            text=None, color=None, scale=None, wrap=None, z=None, at=None, enabled=None, tab=None):
+            text=None, color=None, scale=None, wrap=None, z=None, at=None, enabled=None, tab=None,
+            image=None, fit=None, tint=None, frame=None, cols=None, rows=None, slice=None,
+            radius=None, shadow=None, gradient=None, fade=None, display=None, transition=None,
+            states=None):
         """An instance of `prefab` under `parent` with the given style."""
         e = prefab.instantiate(name, sid)
         if parent is not None:
@@ -144,6 +190,53 @@ class Ui:
         widget = {k: v for k, v in (("enabled", None if enabled is None else int(enabled)), ("tab", tab)) if v is not None}
         if widget:
             _update(e, Widget, **widget)
+        if image is not None or fit is not None or tint is not None or frame is not None:
+            img = e.get(ImageC)
+            img = ImageC(0, 0, 0xFFFFFFFF, 0, 1, 1) if img is None else img.copy()
+            if image is not None:
+                img.asset = asset(image) if isinstance(image, str) else image
+            if fit is not None:
+                img.fit = FIT[fit] if isinstance(fit, str) else fit
+            if tint is not None:
+                img.tint = tint
+            if frame is not None:
+                img.frame = frame
+            if cols is not None:
+                img.cols = cols
+            if rows is not None:
+                img.rows = rows
+            e.set(img)
+        if slice is not None:
+            sl_asset, (left, top, right, bottom) = slice
+            sl_asset = asset(sl_asset) if isinstance(sl_asset, str) else sl_asset
+            e.set(SliceC(sl_asset, float(left), float(top), float(right), float(bottom), 0xFFFFFFFF))
+        decor = {}
+        if radius is not None:
+            decor["radius"] = float(radius)
+        if shadow is not None:
+            blur, dy, color_ = shadow
+            decor.update(shadow_blur=float(blur), shadow_dy=float(dy), shadow_color=color_)
+        if gradient is not None:
+            to, direction_ = gradient
+            decor.update(grad_to=to, grad_dir={"down": 1, "across": 2}[direction_])
+        if fade is not None:
+            decor["fade"] = float(fade)
+        if decor:
+            _update(e, Decor, **decor)
+        if display is not None:
+            e.set(Display(0 if display else 1))
+        if transition is not None:
+            e.set(Transition(int(transition)))
+        if states is not None:
+            fields = {}
+            for state, colors in states.items():
+                if state not in STATES:
+                    raise ValueError(f"unknown state {state!r}; use one of {STATES}")
+                for part, value in colors.items():
+                    if part not in ("fill", "text", "border"):
+                        raise ValueError(f"unknown state color {part!r}; use fill, text or border")
+                    fields[f"{state}_{part}"] = value
+            _update(e, States, **fields)
         return e
 
     def panel(self, parent=None, **style):
@@ -154,6 +247,13 @@ class Ui:
 
     def button(self, parent, text, **style):
         return self.add(self.Button, parent, text=text, **style)
+
+    def choice(self, parent, text, on=False, **style):
+        """A button that stays selected (a toggle button, no check mark). Its
+        look when selected is the `checked` entry of `states=`."""
+        e = self.add(self.Choice, parent, text=text, **style)
+        e.set(Toggle(1 if on else 0))
+        return e
 
     def toggle(self, parent, text=None, on=False, **style):
         """A check box. With `text` it sits in a row beside its label; the
@@ -175,6 +275,11 @@ class Ui:
 
     def text_input(self, parent, text="", **style):
         return self.add(self.TextInput, parent, text=text, **style)
+
+    def image(self, parent, source, **style):
+        """An `<img>`: `source` is a path or an `ui.asset(path)` id. With no
+        size it is as big as the image; `fit=` places it in a bigger box."""
+        return self.add(self.Image, parent, image=source, **style)
 
     def meter(self, parent, value=0.0, low=0.0, high=1.0, **style):
         """A read-only bar (a progress bar). Set its `Slider` value to move it."""

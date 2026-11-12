@@ -1,6 +1,7 @@
 //! Per-world binding state, shared by the host, the Python objects and the
 //! system callbacks.
 
+use std::any::TypeId as RustTypeId;
 use std::cell::{Cell, RefCell};
 use std::collections::BTreeMap;
 use std::rc::Rc;
@@ -185,6 +186,8 @@ pub struct Registry {
     pub rng: RefCell<Rng>,
     /// Interned text (labels, names): components store the 64-bit id.
     pub strings: Rc<RefCell<StringTable>>,
+    /// Host data attached to this world by type (see `Ecs::ext`).
+    pub ext: RefCell<BTreeMap<RustTypeId, Rc<dyn std::any::Any>>>,
     /// Schema migrations for scenes and save games.
     pub migrations: RefCell<Migrations>,
     /// The flecs module the script's components and systems live in.
@@ -211,6 +214,7 @@ impl Registry {
             sids: RefCell::new(BTreeMap::new()),
             rng: RefCell::new(Rng::from_seed(seed)),
             strings: Rc::new(RefCell::new(StringTable::new())),
+            ext: RefCell::new(BTreeMap::new()),
             migrations: RefCell::new(Migrations::new()),
             script_module: Cell::new(0),
             native_modules: RefCell::new(BTreeMap::new()),
