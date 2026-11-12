@@ -3,7 +3,7 @@
 # and lists.
 
 import sage
-from sage.ui import Label, Toggled
+from sage.ui import Absolute, Label, Scroll, ScrollCross, Toggled
 
 ui = world.ui
 T = world.theme
@@ -61,6 +61,7 @@ table = ui.table(
     ["NAME", "LEVEL", "GOLD"],
     [["ADA", 12, 340], ["BO", 7, 1200], ["CY", 31, 85], ["DI", 9, 560]],
     width=ui.fill(),
+    resizable=True,
 )
 table_said = ui.add(T.Body, tablecard, text="SELECTED: NONE")
 
@@ -83,3 +84,18 @@ def layout_table_selection(t: Toggled):
         lsay(table_said, "SELECTED: " + ui.table_values(table)[info[1]][0])
     else:
         lsay(table_said, "SELECTED: NONE")
+
+
+# -- sticky headers and scrolling both ways ----------------------------------------------
+stickycard = lcard(lcol_b, "STICKY AND TWO-WAY")
+ui.add(T.Muted, stickycard, text="THE WHEEL SCROLLS; SHIFT+WHEEL GOES SIDEWAYS. HEADERS STAY.", wrap=True, width=ui.fill())
+sticky_scroll = ui.scroll(stickycard, both=True, width=ui.fill(), height=50)
+for section_no, (head, rows_) in enumerate([("FRUIT", ["APPLE", "PEAR", "PLUM"]), ("TOOLS", ["SAW", "AXE", "ADZE"])]):
+    ui.add(T.Badge, sticky_scroll, text=head, width=200, sticky=0)
+    for fruit_or_tool in rows_:
+        ui.add(T.Chip, sticky_scroll, text=fruit_or_tool + "  " + "-" * 40, width=200)
+sticky_first = sticky_scroll.children[0]
+sticky_second = sticky_scroll.children[4]
+
+bigcard = lcard(lcol_a, "VIRTUAL LIST")
+big_list = ui.virtual_list(bigcard, count=100000, template="ROW %d", rows=5, row_h=10, width=ui.fill())

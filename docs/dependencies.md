@@ -21,3 +21,15 @@ All versions are pinned exactly in the root `Cargo.toml`, and the toolchain is p
 No shader compiler is a dependency: `tools/shaderc` has none (design doc 3.1).
 
 **M2 (2026-11-11):** no new external dependency. `sage_scene` has none; `sage_ui` and `examples/ui_demo` use only the dependencies above and the workspace crates.
+
+**UI parity, dependencies approved by Morgan 2026-11-11 (decisions 1 and 4 of `docs/ui-html-parity.md`), pinned exactly in the workspace `Cargo.toml`:**
+- `roxmltree` 0.21.2 (MIT OR Apache-2.0): parses SVG documents in `sage_ui::svg`.
+- `accesskit` 0.25.2 (MIT OR Apache-2.0): the data model only; `sage_ui::access_kit` maps the accessibility tree onto its `TreeUpdate`. No platform adapter crate is used yet.
+- `fontdue` 0.9.5 (MIT OR Apache-2.0 OR Zlib): rasterizes a TrueType face into the bitmap atlas (`BitmapFont::from_ttf` in `sage_assets`). No font file is committed.
+- `lewton` 0.10.2 (MIT OR Apache-2.0): Ogg Vorbis decoding in `sage_assets::compressed`.
+- `puremp3` 0.1.0 (MIT OR CC0-1.0): MP3 decoding there. It decodes MPEG-1 correctly but plays the 22 kHz variants at the wrong pitch, so those are refused with an error.
+Test fixtures: three tiny generated tones (about 10 KB in all) in `crates/sage_assets/tests/data/`. Approved afterwards (same day), for the last open items:
+- `accesskit_windows` 0.35.2 (MIT OR Apache-2.0), a Windows-only dependency of `sage_platform` (UI Automation adapter, `sage_platform::a11y`). Morgan approved the Windows adapter only.
+- `rustybuzz` 0.20.1 (MIT): shaping (kerning, ligatures) for proportional text, in `sage_assets::proportional`.
+- `unicode-segmentation` 1.13.3 (MIT OR Apache-2.0): grapheme-aware caret and delete in `sage_ui::text`.
+Still **not approved** and not used: `accesskit_unix`, `accesskit_macos`.

@@ -1,0 +1,4 @@
+- [ ] Rounded buttons have a square outline when selected. The outline needs to be rounded with the element.
+- [ ] Gradients use naive interpolation. Using OKLAB would yield a nicer looking gradient.
+- [ ] Text elements currently cannot be drag-selected and copied.
+- [ ] Password in UI playground should show `*` replacement characters

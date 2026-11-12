@@ -13,9 +13,10 @@ use std::time::{Duration, Instant};
 use sage_assets::Image;
 use sage_core::TICK_DT;
 use sage_core::host::{
-    NAV_ACCEPT, NAV_BACKSPACE, NAV_CANCEL, NAV_COPY, NAV_CUT, NAV_DELETE, NAV_DOWN, NAV_END,
-    NAV_HOME, NAV_LEFT, NAV_NEXT, NAV_PAGE_DOWN, NAV_PAGE_UP, NAV_PASTE, NAV_PREV, NAV_REDO,
-    NAV_RIGHT, NAV_SELECT_ALL, NAV_SHIFT, NAV_UNDO, NAV_UP, NAV_WORD, UiFrame,
+    CHORD_ALT, CHORD_CTRL, CHORD_F1, CHORD_SHIFT, NAV_ACCEPT, NAV_ALT, NAV_BACKSPACE, NAV_CANCEL,
+    NAV_COPY, NAV_CUT, NAV_DELETE, NAV_DOWN, NAV_END, NAV_HOME, NAV_LEFT, NAV_NEXT, NAV_PAGE_DOWN,
+    NAV_PAGE_UP, NAV_PASTE, NAV_PREV, NAV_REDO, NAV_RIGHT, NAV_SELECT_ALL, NAV_SHIFT, NAV_UNDO,
+    NAV_UP, NAV_WORD, UiFrame,
 };
 use sdl3::event::{Event, WindowEvent};
 use sdl3::keyboard::{KeyboardState, Keycode, Scancode};
@@ -34,6 +35,11 @@ pub struct UiTickInput {
     pub down: bool,
     /// The right mouse button is held.
     pub secondary: bool,
+    /// The middle mouse button is held.
+    pub middle: bool,
+    /// A key chord pressed this tick: the key (upper-case ASCII or
+    /// `CHORD_F1 + n - 1`) and its `CHORD_*` modifiers.
+    pub chord: Option<[u32; 2]>,
     /// `NAV_*` bits for this tick (with key repeat applied).
     pub nav: u32,
     /// A character typed this tick (one per tick; the rest wait).
@@ -42,6 +48,52 @@ pub struct UiTickInput {
     pub wheel: f32,
     /// The system clipboard's text, read on the tick a paste is asked for.
     pub paste: Option<String>,
+    /// Text an input method is composing, not yet committed (empty for none).
+    /// Not recorded in `sage-input`: it is shown, never acted on.
+    pub composing: String,
+}
+
+impl UiTickInput {
+    /// Writes this tick into a recording: the mouse buttons as `buttons` and
+    /// the rest as the pointer stream. The clipboard text is not recorded.
+    pub fn record_into(&self, rec: &mut sage_core::input::InputRecording, tick: u64) {
+        let buttons = self.down as u32 | (self.secondary as u32) << 1 | (self.middle as u32) << 2;
+        rec.record(tick, sage_core::input::TickInput { buttons });
+        rec.record_pointer(
+            tick,
+            sage_core::input::PointerInput::new(
+                self.pointer,
+                self.nav,
+                self.wheel,
+                self.chord,
+                self.ch,
+            ),
+        );
+    }
+
+    /// The input a recording holds for `tick`.
+    pub fn from_recording(rec: &sage_core::input::InputRecording, tick: u64) -> UiTickInput {
+        let (b, p) = (rec.get(tick).buttons, rec.get_pointer(tick));
+        UiTickInput {
+            pointer: p.pointer(),
+            down: b & 1 != 0,
+            secondary: b & 2 != 0,
+            middle: b & 4 != 0,
+            chord: p.chord,
+            nav: p.mods,
+            ch: p.typed(),
+            wheel: p.wheel_notches(),
+            paste: None,
+            composing: String::new(),
+        }
+    }
+}
+
+/// A request for the operating system's file dialog.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct FileRequest {
+    /// Save instead of open.
+    pub save: bool,
 }
 
 /// What the window loop needs from a UI application.
@@ -60,6 +112,33 @@ pub trait UiApp {
     /// Text a copy or cut put on the clipboard since the last call; the window
     /// publishes it to the system.
     fn take_clipboard(&mut self) -> Option<String> {
+        None
+    }
+    /// Interleaved stereo samples (`frames` of them, at
+    /// [`crate::audio::OUT_RATE`]) for the audio device, if this app makes
+    /// sound. The window asks when the device queue runs low.
+    fn mix_audio(&mut self, _frames: usize) -> Option<Vec<f32>> {
+        None
+    }
+    /// A file dialog the UI wants shown, if any. The window shows it and
+    /// reports the answer through [`UiApp::file_chosen`].
+    fn take_file_request(&mut self) -> Option<FileRequest> {
+        None
+    }
+    /// The answer to a file dialog: the chosen path, or `None` if it was
+    /// cancelled.
+    fn file_chosen(&mut self, _path: Option<String>) {}
+    /// What is on screen for assistive technology: a full tree update. Called
+    /// each tick, but only while something is listening.
+    fn access_tree(&self) -> accesskit::TreeUpdate {
+        crate::a11y::empty_update()
+    }
+    /// An action assistive technology asked for (focus, click).
+    fn access_action(&mut self, _request: accesskit::ActionRequest) {}
+    /// The text face to draw with, when it is not the built-in one. Called
+    /// once; `scale` is the window's whole-number scale (device pixels per UI
+    /// unit), for a face that is rasterized at the size it is shown.
+    fn font(&self, _scale: u32) -> Option<sage_assets::BitmapFont> {
         None
     }
 }
@@ -157,7 +236,55 @@ pub fn modifier_bits(keys: &KeyboardState) -> u32 {
     if key(Scancode::LCtrl) || key(Scancode::RCtrl) {
         bits |= NAV_WORD;
     }
+    if key(Scancode::LAlt) || key(Scancode::RAlt) {
+        bits |= NAV_ALT;
+    }
     bits
+}
+
+/// The chord a key press makes, if it is one: a letter or digit with Ctrl or
+/// Alt held, or a function key with any modifiers.
+pub fn chord_of(code: Keycode, keymod: sdl3::keyboard::Mod) -> Option<[u32; 2]> {
+    use sdl3::keyboard::Mod;
+    let mut mods = 0;
+    if keymod.intersects(Mod::LCTRLMOD | Mod::RCTRLMOD) {
+        mods |= CHORD_CTRL;
+    }
+    if keymod.intersects(Mod::LSHIFTMOD | Mod::RSHIFTMOD) {
+        mods |= CHORD_SHIFT;
+    }
+    if keymod.intersects(Mod::LALTMOD | Mod::RALTMOD) {
+        mods |= CHORD_ALT;
+    }
+    let function = [
+        Keycode::F1,
+        Keycode::F2,
+        Keycode::F3,
+        Keycode::F4,
+        Keycode::F5,
+        Keycode::F6,
+        Keycode::F7,
+        Keycode::F8,
+        Keycode::F9,
+        Keycode::F10,
+        Keycode::F11,
+        Keycode::F12,
+    ]
+    .iter()
+    .position(|k| *k == code);
+    if let Some(n) = function {
+        return Some([CHORD_F1 + n as u32, mods]);
+    }
+    let raw: u32 = code as u32;
+    let ascii = (0x20..0x7f)
+        .contains(&raw)
+        .then(|| (raw as u8).to_ascii_uppercase());
+    match ascii {
+        Some(c) if c.is_ascii_alphanumeric() && mods & (CHORD_CTRL | CHORD_ALT) != 0 => {
+            Some([c as u32, mods])
+        }
+        _ => None,
+    }
 }
 
 /// What the window's events add up to between ticks: where the mouse is,
@@ -170,8 +297,11 @@ pub struct UiEvents {
     pub inside: bool,
     pub down: bool,
     pub secondary: bool,
+    pub middle: bool,
+    chord: Option<[u32; 2]>,
     wheel: f32,
     typed: VecDeque<char>,
+    composing: String,
 }
 
 impl UiEvents {
@@ -223,10 +353,39 @@ impl UiEvents {
                 mouse_btn: MouseButton::Right,
                 ..
             } => self.secondary = false,
+            Event::MouseButtonDown {
+                mouse_btn: MouseButton::Middle,
+                x,
+                y,
+                ..
+            } => {
+                self.mouse = [*x, *y];
+                self.inside = true;
+                self.middle = true;
+            }
+            Event::MouseButtonUp {
+                mouse_btn: MouseButton::Middle,
+                ..
+            } => self.middle = false,
+            Event::KeyDown {
+                keycode: Some(code),
+                keymod,
+                repeat: false,
+                ..
+            } => {
+                if let Some(chord) = chord_of(*code, *keymod) {
+                    self.chord = Some(chord);
+                }
+            }
             // SDL's wheel is positive away from the user (scroll up); the UI
             // counts positive as content moving down.
             Event::MouseWheel { y, .. } => self.wheel -= *y,
-            Event::TextInput { text, .. } => self.typed.extend(text.chars()),
+            Event::TextInput { text, .. } => {
+                self.typed.extend(text.chars());
+                // What was being composed is now committed.
+                self.composing.clear();
+            }
+            Event::TextEditing { text, .. } => self.composing = text.clone(),
             Event::Window {
                 win_event: WindowEvent::MouseLeave,
                 ..
@@ -244,11 +403,48 @@ impl UiEvents {
             pointer: self.inside.then(|| to_ui(self.mouse)),
             down: self.down,
             secondary: self.secondary,
+            middle: self.middle,
+            chord: self.chord.take(),
             nav,
             ch: self.typed.pop_front(),
             wheel: std::mem::take(&mut self.wheel),
             paste: None,
+            composing: self.composing.clone(),
         }
+    }
+}
+
+/// Shows the system's open or save dialog over `window`; the chosen path (or
+/// `None` for a cancel or an error) is sent on `answer`.
+fn show_file_dialog(
+    request: FileRequest,
+    window: &sdl3::video::Window,
+    answer: std::sync::mpsc::Sender<Option<String>>,
+) {
+    let callback: sdl3::dialog::DialogCallback = Box::new(move |result, _filter| {
+        if let Err(e) = &result
+            && !matches!(e, sdl3::dialog::DialogError::Canceled)
+        {
+            eprintln!("file dialog: {e:?}");
+        }
+        let path = result
+            .ok()
+            .and_then(|paths| paths.into_iter().next())
+            .map(|p| p.to_string_lossy().into_owned());
+        let _ = answer.send(path);
+    });
+    let filters = [sdl3::dialog::DialogFileFilter {
+        name: "All files",
+        pattern: "*",
+    }];
+    let none: Option<&std::path::Path> = None;
+    let shown = if request.save {
+        sdl3::dialog::show_save_file_dialog(&filters, none, window, callback)
+    } else {
+        sdl3::dialog::show_open_file_dialog(&filters, none, false, window, callback)
+    };
+    if let Err(e) = shown {
+        eprintln!("file dialog could not open: {e:?}");
     }
 }
 
@@ -262,11 +458,26 @@ pub fn run_ui_windowed<A: UiApp>(app: &mut A, options: &WindowOptions) -> Result
     if options.hidden {
         builder.hidden();
     }
-    let window = builder.build().map_err(|e| e.to_string())?;
+    // Built hidden so the accessibility adapter can attach before the window
+    // is first shown (Windows needs that); shown below unless it should stay
+    // hidden.
+    builder.hidden();
+    let mut window = builder.build().map_err(|e| e.to_string())?;
+    let mut a11y = crate::a11y::Accessibility::attach(&window);
+    if !options.hidden {
+        window.show();
+    }
     let mut gpu = GpuRenderer::new(window.clone())
         .map_err(|e| format!("the UI window needs the GPU renderer: {e}"))?;
     for (id, image) in app.images() {
         gpu.register_ui_image(id, &image)?;
+    }
+    {
+        let (pw, ph) = window.size_in_pixels();
+        let (scale, _) = ui_view([pw as f32, ph as f32], app.size());
+        if let Some(font) = app.font(scale.round().max(1.0) as u32) {
+            gpu.set_font(font)?;
+        }
     }
     video.text_input().start(&window);
     let clipboard = video.clipboard();
@@ -278,6 +489,16 @@ pub fn run_ui_windowed<A: UiApp>(app: &mut A, options: &WindowOptions) -> Result
     let mut input_events = UiEvents::default();
     let mut nav = NavSampler::default();
     let mut last_frame = None;
+    // File dialogs are asynchronous: the answer arrives on this channel.
+    let (dialog_tx, dialog_rx) = std::sync::mpsc::channel::<Option<String>>();
+    let mut dialog_open = false;
+    // Sound is for a window the user sees: a hidden smoke-test window stays
+    // silent, and so does a machine with no audio device.
+    let mut audio = if options.max_frames.is_none() {
+        crate::audio::AudioOut::open(&sdl).ok()
+    } else {
+        None
+    };
 
     'run: loop {
         for event in events.poll_iter() {
@@ -313,11 +534,33 @@ pub fn run_ui_windowed<A: UiApp>(app: &mut A, options: &WindowOptions) -> Result
                 input.paste = clipboard.clipboard_text().ok();
             }
             app.tick(&input);
+            while let Ok(answer) = dialog_rx.try_recv() {
+                dialog_open = false;
+                app.file_chosen(answer);
+            }
+            if let Some(a) = a11y.as_mut() {
+                a.update(|| app.access_tree());
+                for request in a.actions() {
+                    app.access_action(request);
+                }
+            }
+            if !dialog_open && let Some(request) = app.take_file_request() {
+                dialog_open = true;
+                show_file_dialog(request, &window, dialog_tx.clone());
+            }
             if let Some(text) = app.take_clipboard() {
                 let _ = clipboard.set_clipboard_text(&text);
             }
             ticks += 1;
             accumulator -= tick_len;
+        }
+        if let Some(out) = audio.as_mut() {
+            let want = out.wanted_frames();
+            if want > 0
+                && let Some(samples) = app.mix_audio(want)
+            {
+                out.push(&samples)?;
+            }
         }
         let frame = app.frame();
         gpu.draw_ui(&frame)?;
@@ -499,6 +742,96 @@ mod tests {
         };
         assert!(e.handle(&ctrl_q));
         assert!(e.handle(&Event::Quit { timestamp: 0 }));
+    }
+
+    #[test]
+    fn the_middle_button_and_key_chords_reach_the_tick_once() {
+        use sdl3::keyboard::Mod;
+        let mut e = UiEvents::default();
+        let middle = |down: bool| {
+            if down {
+                Event::MouseButtonDown {
+                    timestamp: 0,
+                    window_id: 0,
+                    which: 0,
+                    mouse_btn: MouseButton::Middle,
+                    clicks: 1,
+                    x: 2.0,
+                    y: 3.0,
+                }
+            } else {
+                Event::MouseButtonUp {
+                    timestamp: 0,
+                    window_id: 0,
+                    which: 0,
+                    mouse_btn: MouseButton::Middle,
+                    clicks: 1,
+                    x: 2.0,
+                    y: 3.0,
+                }
+            }
+        };
+        e.handle(&middle(true));
+        let t = e.tick(0, |m| m);
+        assert!(t.middle && !t.down && !t.secondary);
+        e.handle(&middle(false));
+        assert!(!e.tick(0, |m| m).middle);
+        // Ctrl+S is a chord, delivered on one tick only; a bare S is typing.
+        let key = |code: Keycode, keymod: Mod, repeat: bool| Event::KeyDown {
+            timestamp: 0,
+            window_id: 0,
+            keycode: Some(code),
+            scancode: None,
+            keymod,
+            repeat,
+            which: 0,
+            raw: 0,
+        };
+        e.handle(&key(Keycode::S, Mod::empty(), false));
+        assert_eq!(e.tick(0, |m| m).chord, None);
+        e.handle(&key(Keycode::S, Mod::LCTRLMOD, false));
+        assert_eq!(e.tick(0, |m| m).chord, Some([b'S' as u32, CHORD_CTRL]));
+        assert_eq!(e.tick(0, |m| m).chord, None, "it fires once");
+        e.handle(&key(Keycode::S, Mod::LCTRLMOD, true));
+        assert_eq!(
+            e.tick(0, |m| m).chord,
+            None,
+            "a held key does not repeat it"
+        );
+        // Function keys need no modifier; Alt and Shift add their bits.
+        e.handle(&key(Keycode::F5, Mod::empty(), false));
+        assert_eq!(e.tick(0, |m| m).chord, Some([CHORD_F1 + 4, 0]));
+        e.handle(&key(Keycode::_1, Mod::LALTMOD | Mod::LSHIFTMOD, false));
+        assert_eq!(
+            e.tick(0, |m| m).chord,
+            Some([b'1' as u32, CHORD_ALT | CHORD_SHIFT])
+        );
+    }
+
+    #[test]
+    fn composing_text_shows_until_it_is_committed() {
+        let mut e = UiEvents::default();
+        let edit = |text: &str| Event::TextEditing {
+            timestamp: 0,
+            window_id: 0,
+            text: text.to_string(),
+            start: 0,
+            length: text.chars().count() as i32,
+        };
+        e.handle(&edit("ni"));
+        assert_eq!(e.tick(0, |m| m).composing, "ni");
+        // It stays while the user keeps composing, even across ticks.
+        assert_eq!(e.tick(0, |m| m).composing, "ni");
+        e.handle(&edit("nih"));
+        assert_eq!(e.tick(0, |m| m).composing, "nih");
+        // The committed text arrives as typing and ends the composition.
+        e.handle(&typed("\u{4f60}"));
+        let t = e.tick(0, |m| m);
+        assert_eq!((t.composing.as_str(), t.ch), ("", Some('\u{4f60}')));
+        // An empty edit (the user cancelled) clears it too.
+        e.handle(&edit("x"));
+        e.handle(&edit(""));
+        assert_eq!(e.tick(0, |m| m).composing, "");
     }
 
     #[test]

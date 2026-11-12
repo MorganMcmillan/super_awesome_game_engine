@@ -103,6 +103,37 @@ pub fn byte_of(s: &str, chars: usize) -> usize {
     s.char_indices().nth(chars).map_or(s.len(), |(b, _)| b)
 }
 
+/// The caret position (in characters) one grapheme cluster to the left of
+/// `pos`: a letter with its accents, an emoji with its modifiers, a flag, are
+/// one step.
+pub fn prev_grapheme(text: &str, pos: usize) -> usize {
+    use unicode_segmentation::UnicodeSegmentation;
+    let mut at = 0;
+    let mut best = 0;
+    for g in text.graphemes(true) {
+        if at >= pos {
+            break;
+        }
+        best = at;
+        at += g.chars().count();
+    }
+    if at < pos { at.min(pos) } else { best }
+}
+
+/// One grapheme cluster to the right of `pos` (or the end of the text).
+pub fn next_grapheme(text: &str, pos: usize) -> usize {
+    use unicode_segmentation::UnicodeSegmentation;
+    let mut at = 0;
+    for g in text.graphemes(true) {
+        let next = at + g.chars().count();
+        if next > pos {
+            return next;
+        }
+        at = next;
+    }
+    at
+}
+
 fn chars_of(s: &str) -> Vec<char> {
     s.chars().collect()
 }
@@ -308,8 +339,8 @@ impl Field {
             return;
         }
         let to = match (dir < 0, word) {
-            (true, false) => self.caret.saturating_sub(1),
-            (false, false) => (self.caret + 1).min(self.len()),
+            (true, false) => prev_grapheme(&self.text, self.caret),
+            (false, false) => next_grapheme(&self.text, self.caret),
             (true, true) => word_left(&self.text, self.caret),
             (false, true) => word_right(&self.text, self.caret),
         };
@@ -374,13 +405,13 @@ impl Field {
                 hi = if word {
                     word_right(&self.text, lo)
                 } else {
-                    (lo + 1).min(self.len())
+                    next_grapheme(&self.text, lo)
                 };
             } else {
                 lo = if word {
                     word_left(&self.text, hi)
                 } else {
-                    lo.saturating_sub(1)
+                    prev_grapheme(&self.text, hi)
                 };
             }
         }
@@ -453,6 +484,7 @@ impl Field {
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct Style {
     pub bold: bool,
+    pub italic: bool,
     pub code: bool,
     /// `0xRRGGBBAA`, or 0 for the node's own text color.
     pub color: u32,
@@ -478,6 +510,7 @@ pub fn parse_markup(src: &str) -> Rich {
     let c: Vec<char> = src.chars().collect();
     let mut out = Rich::default();
     let mut bold = false;
+    let mut italic = false;
     let mut code = false;
     let mut colors: Vec<u32> = vec![];
     let mut link = 0u32;
@@ -489,6 +522,7 @@ pub fn parse_markup(src: &str) -> Rich {
     while i < c.len() {
         let st = Style {
             bold,
+            italic,
             code,
             color: colors.last().copied().unwrap_or(0),
             link,
@@ -512,6 +546,12 @@ pub fn parse_markup(src: &str) -> Rich {
                 bold = !bold;
                 i += 2;
             }
+            // A single * (not **) opens or closes italics when another one
+            // follows, so a lone asterisk is still an asterisk.
+            '*' if italic || c[i + 1..].contains(&'*') => {
+                italic = !italic;
+                i += 1;
+            }
             '`' if c[i + 1..].contains(&'`') => {
                 code = true;
                 i += 1;
@@ -528,7 +568,7 @@ pub fn parse_markup(src: &str) -> Rich {
                     // the link ends so the target is skipped.
                     let label = parse_markup_inner(
                         &c[i + 1..k],
-                        bold,
+                        (bold, italic),
                         colors.last().copied().unwrap_or(0),
                         link,
                     );
@@ -567,11 +607,12 @@ pub fn parse_markup(src: &str) -> Rich {
 }
 
 /// A link's label: the same markup, every character linked.
-fn parse_markup_inner(src: &[char], bold: bool, color: u32, link: u32) -> Rich {
+fn parse_markup_inner(src: &[char], (bold, italic): (bool, bool), color: u32, link: u32) -> Rich {
     let text: String = src.iter().collect();
     let mut r = parse_markup(&text);
     for st in &mut r.styles {
         st.bold |= bold;
+        st.italic |= italic;
         if st.color == 0 {
             st.color = color;
         }
@@ -875,5 +916,42 @@ mod tests {
                 assert_eq!(lines.split('\n').count(), r.len(), "{text:?} at {cols}");
             }
         }
+    }
+
+    #[test]
+    fn the_caret_and_delete_move_by_grapheme_not_by_code_point() {
+        // "e" with a combining acute (2 chars), a family emoji joined with
+        // zero-width joiners (5 chars), a flag (2 chars), and a plain letter.
+        let text = "e\u{301}\u{1F468}\u{200D}\u{1F469}\u{200D}\u{1F467}\u{1F1E9}\u{1F1EA}z";
+        assert_eq!(char_len(text), 2 + 5 + 2 + 1);
+        let marks = [0, 2, 7, 9, 10];
+        for w in marks.windows(2) {
+            assert_eq!(next_grapheme(text, w[0]), w[1], "right from {}", w[0]);
+            assert_eq!(prev_grapheme(text, w[1]), w[0], "left from {}", w[1]);
+        }
+        assert_eq!(next_grapheme(text, 10), 10);
+        assert_eq!(prev_grapheme(text, 0), 0);
+        // In the middle of a cluster the caret steps out of it.
+        assert_eq!(next_grapheme(text, 1), 2);
+        assert_eq!(prev_grapheme(text, 3), 2);
+        // The field steps and deletes the same way.
+        let mut f = Field::new(text);
+        f.move_to(0, false);
+        f.step(1, false, false);
+        assert_eq!(f.caret, 2);
+        f.step(1, false, false);
+        assert_eq!(f.caret, 7);
+        let mut hist = History::default();
+        assert!(
+            f.delete(false, false, &mut hist),
+            "backspace removes the family"
+        );
+        assert_eq!(char_len(&f.text), 5);
+        assert!(f.delete(true, false, &mut hist), "delete removes the flag");
+        assert_eq!(f.text, "e\u{301}z");
+        // Plain ASCII is as before.
+        let mut a = Field::new("abc");
+        a.step(-1, false, false);
+        assert_eq!(a.caret, 2);
     }
 }

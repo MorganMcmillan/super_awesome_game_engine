@@ -7,6 +7,7 @@
 use std::collections::BTreeMap;
 
 use sage_assets::{BitmapFont, Image};
+use sage_core::host::STYLE_BOLD;
 use sage_core::host::{DrawKind, Frame, UiDraw, UiFrame};
 
 /// A texture slot in the renderer. 0 is a 1x1 white texture (solid
@@ -74,6 +75,42 @@ impl SpriteBatch {
         color: [f32; 4],
     ) {
         self.quad_colors(texture, top_left, size, uv_min, uv_max, [color; 4]);
+    }
+
+    /// A flat-colored triangle (screen pixels), drawn as a quad whose fourth
+    /// corner repeats the third, so a batch still holds only quads.
+    pub fn triangle(&mut self, pts: [[f32; 2]; 3], colors: [[f32; 4]; 3]) {
+        self.polygon(
+            [pts[0], pts[1], pts[2], pts[2]],
+            [colors[0], colors[1], colors[2], colors[2]],
+        );
+    }
+
+    /// Any four points (screen pixels, in order around the shape) filled
+    /// with the solid texture. The GPU draws it as two triangles.
+    pub fn polygon(&mut self, pts: [[f32; 2]; 4], colors: [[f32; 4]; 4]) {
+        let base = self.vertices.len() as u32;
+        for k in 0..4 {
+            self.vertices.push(Vertex {
+                pos: [
+                    pts[k][0] / self.viewport[0] * 2.0 - 1.0,
+                    1.0 - pts[k][1] / self.viewport[1] * 2.0,
+                ],
+                uv: [0.5, 0.5],
+                color: colors[k],
+            });
+        }
+        let first = self.indices.len() as u32;
+        self.indices
+            .extend([base, base + 1, base + 2, base, base + 2, base + 3]);
+        match self.runs.last_mut() {
+            Some(run) if run.texture == WHITE => run.index_count += 6,
+            _ => self.runs.push(Run {
+                texture: WHITE,
+                first_index: first,
+                index_count: 6,
+            }),
+        }
     }
 
     /// A quad with a color at each corner (top-left, top-right,
@@ -533,19 +570,31 @@ pub fn compose_ui(
                 scale: s,
                 color,
                 clip,
+                style,
             } => {
                 let clip = px_clip(clip);
-                for g in font.layout(text, at(*pos), scale * s) {
-                    clipped_quad(
-                        &mut batch,
-                        FONT,
-                        g.pos,
-                        g.size,
-                        g.uv_min,
-                        g.uv_max,
-                        [rgba_f(*color); 4],
-                        clip,
-                    );
+                // A face with styled glyphs draws bold and italic from its
+                // atlas; the built-in face strikes bold twice, one unit
+                // apart, and has no italic.
+                let strikes: &[f32] = if *style & STYLE_BOLD != 0 && !font.styled {
+                    &[0.0, 1.0]
+                } else {
+                    &[0.0]
+                };
+                for dx in strikes {
+                    let origin = at([pos[0] + dx * s, pos[1]]);
+                    for g in font.layout_styled(text, origin, scale * s, *style) {
+                        clipped_quad(
+                            &mut batch,
+                            FONT,
+                            g.pos,
+                            g.size,
+                            g.uv_min,
+                            g.uv_max,
+                            [rgba_f(*color); 4],
+                            clip,
+                        );
+                    }
                 }
             }
             UiDraw::Image {
@@ -680,6 +729,12 @@ pub fn compose_ui(
                     px_clip(clip),
                 );
             }
+            UiDraw::Triangle { pts, colors } => {
+                batch.triangle(pts.map(at), colors.map(rgba_f));
+            }
+            UiDraw::Quad { pts, color } => {
+                batch.polygon(pts.map(at), [rgba_f(*color); 4]);
+            }
             UiDraw::Gradient {
                 pos,
                 size,
@@ -700,10 +755,54 @@ pub fn compose_ui(
     batch
 }
 
+/// Fills a triangle given as `(pixel position, color)` corners, blending
+/// colors by barycentric weight. A pixel is covered when its center is
+/// inside; a center exactly on an edge counts only for a top or left edge, so
+/// the edge two triangles share is filled once.
+fn fill_triangle(px: &mut [[f32; 4]], size: [usize; 2], t: [([f32; 2], [f32; 4]); 3]) {
+    let [(a, ca), (b, cb), (c, cc)] = t;
+    let area = (b[0] - a[0]) * (c[1] - a[1]) - (c[0] - a[0]) * (b[1] - a[1]);
+    if area.abs() < 1e-6 {
+        return;
+    }
+    let (x0, x1) = (a[0].min(b[0]).min(c[0]), a[0].max(b[0]).max(c[0]));
+    let (y0, y1) = (a[1].min(b[1]).min(c[1]), a[1].max(b[1]).max(c[1]));
+    let lo = |v: f32| (v - 0.5).floor().max(0.0) as usize;
+    let hi = |v: f32, n: usize| ((v + 0.5).ceil().max(0.0) as usize).min(n);
+    let sign = area.signum();
+    for y in lo(y0)..hi(y1, size[1]) {
+        for x in lo(x0)..hi(x1, size[0]) {
+            let (cx, cy) = (x as f32 + 0.5, y as f32 + 0.5);
+            let edge = |p: [f32; 2], q: [f32; 2]| {
+                ((q[0] - p[0]) * (cy - p[1]) - (cx - p[0]) * (q[1] - p[1])) * sign
+            };
+            let (w0, w1, w2) = (edge(b, c), edge(c, a), edge(a, b));
+            let owns = |w: f32, p: [f32; 2], q: [f32; 2]| {
+                let e = if sign > 0.0 {
+                    [q[0] - p[0], q[1] - p[1]]
+                } else {
+                    [p[0] - q[0], p[1] - q[1]]
+                };
+                w > 0.0 || (w == 0.0 && (e[1] < 0.0 || (e[1] == 0.0 && e[0] > 0.0)))
+            };
+            if !(owns(w0, b, c) && owns(w1, c, a) && owns(w2, a, b)) {
+                continue;
+            }
+            let (l0, l1, l2) = (w0 / area.abs(), w1 / area.abs(), w2 / area.abs());
+            let src: [f32; 4] = std::array::from_fn(|i| ca[i] * l0 + cb[i] * l1 + cc[i] * l2);
+            let dst = &mut px[y * size[0] + x];
+            for i in 0..3 {
+                dst[i] = src[i] * src[3] + dst[i] * (1.0 - src[3]);
+            }
+            dst[3] = src[3] + dst[3] * (1.0 - src[3]);
+        }
+    }
+}
+
 /// Reference rasterizer: draws a batch on the CPU with nearest sampling and
 /// straight-alpha blending over `clear`, the way the GPU path should.
-/// Returns `w * h` RGBA pixels, top row first. Quads must be axis-aligned,
-/// which is all `SpriteBatch` can produce.
+/// Returns `w * h` RGBA pixels, top row first. Textured quads must be axis-aligned; free-form
+/// polygons (`SpriteBatch::polygon`) are filled with the solid texture.
 pub fn rasterize(
     batch: &SpriteBatch,
     textures: &[Image],
@@ -730,6 +829,19 @@ pub fn rasterize(
                 ]
             };
             let (a, b) = (to_px(v0.pos), to_px(v2.pos));
+            let axis_aligned = to_px(v1.pos)[1] == a[1]
+                && to_px(v1.pos)[0] == b[0]
+                && to_px(v3.pos)[0] == a[0]
+                && to_px(v3.pos)[1] == b[1];
+            if !axis_aligned {
+                // A free-form polygon: fill both triangles of the quad with
+                // barycentric colors (solid texture only).
+                let p = [v0, v1, v2, v3].map(|v| (to_px(v.pos), v.color));
+                for tri in [[0, 1, 2], [0, 2, 3]] {
+                    fill_triangle(&mut px, [w, h], tri.map(|k| p[k]));
+                }
+                continue;
+            }
             let (x0, x1) = (a[0].min(b[0]), a[0].max(b[0]));
             let (y0, y1) = (a[1].min(b[1]), a[1].max(b[1]));
             // Only the pixels whose centers can be inside the quad.
@@ -1026,6 +1138,7 @@ mod tests {
                     scale: 1.0,
                     color: [255, 255, 255, 255],
                     clip: None,
+                    style: 0,
                 },
             ],
         };
@@ -1067,6 +1180,7 @@ mod tests {
                 scale: 1.0,
                 color: [255; 4],
                 clip,
+                style: 0,
             }],
         };
         let render = |frame: &UiFrame| {
@@ -1317,6 +1431,57 @@ mod tests {
         );
         assert_eq!(at(0, 16), 0, "nothing past the blur radius");
         assert_eq!(at(16, 1), 0);
+    }
+
+    #[test]
+    fn triangles_and_free_quads_fill_only_what_they_cover() {
+        let mut res = UiResources::new(2);
+        let red = [255, 0, 0, 255];
+        let px = paint(
+            vec![
+                // The lower-left half of the 16x16 square.
+                UiDraw::Triangle {
+                    pts: [[0.0, 0.0], [0.0, 16.0], [16.0, 16.0]],
+                    colors: [red; 3],
+                },
+            ],
+            &mut res,
+            16,
+            16,
+        );
+        let at = |p: &[[u8; 4]], x: usize, y: usize| p[y * 16 + x];
+        assert_eq!(at(&px, 2, 13), red, "inside the triangle");
+        assert_ne!(at(&px, 13, 2), red, "outside it");
+        let covered = px.iter().filter(|p| **p == red).count();
+        assert!((120..=136).contains(&covered), "half of 256, got {covered}");
+        // A diamond (a rotated square) leaves the corners of its box alone.
+        let px = paint(
+            vec![UiDraw::Quad {
+                pts: [[8.0, 0.0], [16.0, 8.0], [8.0, 16.0], [0.0, 8.0]],
+                color: red,
+            }],
+            &mut res,
+            16,
+            16,
+        );
+        assert_eq!(at(&px, 8, 8), red);
+        assert_ne!(at(&px, 1, 1), red, "the box's corner is empty");
+        assert_ne!(at(&px, 15, 15), red);
+        let covered = px.iter().filter(|p| **p == red).count();
+        assert!((120..=136).contains(&covered), "half of 256, got {covered}");
+        // Vertex colors blend across a triangle.
+        let px = paint(
+            vec![UiDraw::Triangle {
+                pts: [[0.0, 0.0], [16.0, 0.0], [0.0, 16.0]],
+                colors: [[255, 0, 0, 255], [0, 0, 255, 255], [0, 255, 0, 255]],
+            }],
+            &mut res,
+            16,
+            16,
+        );
+        assert!(at(&px, 0, 0)[0] > 200, "red near its corner");
+        assert!(at(&px, 14, 0)[2] > 180, "blue near its corner");
+        assert!(at(&px, 0, 14)[1] > 180, "green near its corner");
     }
 
     #[test]

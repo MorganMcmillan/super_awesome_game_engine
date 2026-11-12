@@ -50,6 +50,16 @@ sdl3 = { version = "=0.22.1", features = ["build-from-source-static"] }
 parry2d = { version = "=0.31.1" }
 # PNG decoding only (M1 asset pipeline). MIT OR Apache-2.0.
 image = { version = "=0.25.10", default-features = false, features = ["png"] }
+# Approved by Morgan 2026-11-11 (UI parity plan, decision 4 and 1). All MIT OR Apache-2.0 (fontdue also Zlib; puremp3 MIT OR CC0-1.0).
+roxmltree = { version = "=0.21.2" }
+accesskit = { version = "=0.25.2" }
+# Windows UI Automation adapter (approved 2026-11-11: the Windows one only).
+accesskit_windows = { version = "=0.35.2" }
+fontdue = { version = "=0.9.5" }
+rustybuzz = { version = "=0.20.1" }
+unicode-segmentation = { version = "=1.13.3" }
+lewton = { version = "=0.10.2" }
+puremp3 = { version = "=0.1.0" }
 
 sage_core = { path = "crates/sage_core" }
 sage_collision = { path = "crates/sage_collision" }

@@ -2,9 +2,14 @@
 //! data presentation consumes (`sage_core::host`). The UI itself never
 //! touches a renderer.
 
-use sage_core::host::{UI_ADVANCE, UI_GLYPH, UI_LINE_HEIGHT, UiDraw, UiFrame};
+use sage_core::host::{
+    STYLE_BOLD, STYLE_ITALIC, UI_ADVANCE, UI_GLYPH, UI_LINE_HEIGHT, UiDraw, UiFrame,
+};
 
-use crate::layout::{Direction, Fit, ImageNode, Node, Rect, Tree, Widget, chars_per_line, rgba};
+use crate::layout::{
+    Direction, Fit, ImageNode, Node, Rect, ShapeNode, Tree, ViewportNode, Widget, chars_per_line,
+    rgba,
+};
 use crate::style::{faded, resolve};
 use crate::text::{locate, mask, rows};
 
@@ -16,6 +21,189 @@ fn rect(out: &mut Vec<UiDraw>, r: Rect, color: [u8; 4], clip: Option<Rect>) {
             pos: [r.x, r.y],
             size: [r.w, r.h],
             color,
+        });
+    }
+}
+
+/// Cuts a convex polygon to the rectangle `r` (left, top, right, bottom).
+pub fn clip_polygon(poly: &[[f32; 2]], r: [f32; 4]) -> Vec<[f32; 2]> {
+    // Sutherland-Hodgman, one edge of the rectangle at a time.
+    let mut pts = poly.to_vec();
+    for edge in 0..4 {
+        let inside = |p: [f32; 2]| match edge {
+            0 => p[0] >= r[0],
+            1 => p[1] >= r[1],
+            2 => p[0] <= r[2],
+            _ => p[1] <= r[3],
+        };
+        let cut = |a: [f32; 2], b: [f32; 2]| {
+            let (axis, line) = match edge {
+                0 => (0, r[0]),
+                1 => (1, r[1]),
+                2 => (0, r[2]),
+                _ => (1, r[3]),
+            };
+            let t = (line - a[axis]) / (b[axis] - a[axis]);
+            let mut p = [a[0] + (b[0] - a[0]) * t, a[1] + (b[1] - a[1]) * t];
+            p[axis] = line;
+            p
+        };
+        let mut next = vec![];
+        for k in 0..pts.len() {
+            let (a, b) = (pts[k], pts[(k + 1) % pts.len()]);
+            match (inside(a), inside(b)) {
+                (true, true) => next.push(b),
+                (true, false) => next.push(cut(a, b)),
+                (false, true) => {
+                    next.push(cut(a, b));
+                    next.push(b);
+                }
+                (false, false) => {}
+            }
+        }
+        pts = next;
+        if pts.is_empty() {
+            break;
+        }
+    }
+    pts
+}
+
+/// A convex polygon as a fan of triangles, cut to `clip` first.
+fn fan(out: &mut Vec<UiDraw>, poly: &[[f32; 2]], color: [u8; 4], clip: [f32; 4]) {
+    if color[3] == 0 {
+        return;
+    }
+    let pts = clip_polygon(poly, clip);
+    for k in 1..pts.len().saturating_sub(1) {
+        out.push(UiDraw::Triangle {
+            pts: [pts[0], pts[k], pts[k + 1]],
+            colors: [color; 3],
+        });
+    }
+}
+
+/// Draws a canvas shape: its points are relative to the node's top-left, and
+/// it is cut off at the node's rectangle and any clip.
+fn shape(out: &mut Vec<UiDraw>, n: &Node, s: &ShapeNode, fade: f32) {
+    let r = n.rect;
+    let bounds = n.clip.map_or(r, |c| r.intersect(&c));
+    let clip = [bounds.x, bounds.y, bounds.x + bounds.w, bounds.y + bounds.h];
+    let at = |p: [f32; 2]| [r.x + p[0], r.y + p[1]];
+    let color = faded(rgba(s.color), fade);
+    match s.kind {
+        1 => {
+            let (a, b) = (at(s.pts[0]), at(s.pts[1]));
+            let (dx, dy) = (b[0] - a[0], b[1] - a[1]);
+            let len = (dx * dx + dy * dy).sqrt();
+            let half = s.width.max(0.0) / 2.0;
+            let (nx, ny) = if len > 0.0 {
+                (-dy / len * half, dx / len * half)
+            } else {
+                (0.0, half)
+            };
+            // A point is a square of the line's width.
+            let (tx, ty) = if len > 0.0 { (0.0, 0.0) } else { (half, 0.0) };
+            fan(
+                out,
+                &[
+                    [a[0] + nx - tx, a[1] + ny - ty],
+                    [b[0] + nx + tx, b[1] + ny + ty],
+                    [b[0] - nx + tx, b[1] - ny + ty],
+                    [a[0] - nx - tx, a[1] - ny - ty],
+                ],
+                color,
+                clip,
+            );
+        }
+        2 => {
+            fan(
+                out,
+                &[at(s.pts[0]), at(s.pts[1]), at(s.pts[2])],
+                color,
+                clip,
+            );
+        }
+        3 => {
+            let (c, radii) = (at(s.pts[0]), s.pts[1]);
+            let segments = ((radii[0].max(radii[1]) * 2.0) as usize).clamp(12, 64);
+            let poly: Vec<[f32; 2]> = (0..segments)
+                .map(|k| {
+                    let a = k as f32 / segments as f32 * std::f32::consts::TAU;
+                    [c[0] + radii[0] * a.cos(), c[1] + radii[1] * a.sin()]
+                })
+                .collect();
+            fan(out, &poly, color, clip);
+        }
+        _ => {}
+    }
+}
+
+/// How a world of `world` units is fitted into `r`: its scale and the
+/// top-left of its bottom-left-origin box, letterboxed and centered.
+pub fn viewport_fit(r: Rect, world: [f32; 2]) -> (f32, [f32; 2]) {
+    if world[0] <= 0.0 || world[1] <= 0.0 {
+        return (1.0, [r.x, r.y]);
+    }
+    let scale = (r.w / world[0]).min(r.h / world[1]);
+    (
+        scale,
+        [
+            r.x + (r.w - world[0] * scale) / 2.0,
+            r.y + (r.h - world[1] * scale) / 2.0,
+        ],
+    )
+}
+
+/// The color a simulation's `DrawKind` is drawn in inside a viewport.
+fn kind_rgba(kind: sage_core::host::DrawKind) -> [u8; 4] {
+    use sage_core::host::DrawKind;
+    match kind {
+        DrawKind::Court => [16, 20, 28, 255],
+        DrawKind::Wall => [120, 130, 150, 255],
+        DrawKind::Goal => [60, 30, 40, 255],
+        DrawKind::Paddle => [235, 235, 240, 255],
+        DrawKind::Ball => [255, 200, 60, 255],
+    }
+}
+
+/// An embedded simulation's frame, fitted into the node's rectangle.
+fn viewport(out: &mut Vec<UiDraw>, n: &Node, v: &ViewportNode, fade: f32) {
+    let r = n.rect;
+    let clip = n.clip;
+    let Some(frame) = &v.frame else {
+        return;
+    };
+    let (scale, origin) = viewport_fit(r, frame.world_size);
+    let height = frame.world_size[1];
+    for d in &frame.rects {
+        let top_left = Rect {
+            x: origin[0] + (d.center[0] - d.half[0]) * scale,
+            y: origin[1] + (height - d.center[1] - d.half[1]) * scale,
+            w: d.half[0] * 2.0 * scale,
+            h: d.half[1] * 2.0 * scale,
+        };
+        rect(
+            out,
+            top_left.intersect(&r),
+            faded(kind_rgba(d.kind), fade),
+            clip,
+        );
+    }
+    let text = Rect {
+        x: r.x + 3.0,
+        y: r.y + 2.0,
+        w: (r.w - 6.0).max(0.0),
+        h: (r.h - 4.0).max(0.0),
+    };
+    for (k, line) in frame.hud.iter().enumerate() {
+        out.push(UiDraw::Text {
+            style: 0,
+            pos: [text.x, text.y + k as f32 * UI_LINE_HEIGHT],
+            text: line.clone(),
+            scale: 1.0,
+            color: faded([235, 235, 240, 255], fade),
+            clip: clip4(Some(clip.map_or(text, |c| c.intersect(&text)))),
         });
     }
 }
@@ -33,6 +221,45 @@ fn outline(out: &mut Vec<UiDraw>, r: Rect, t: f32, color: [u8; 4], clip: Option<
     );
 }
 
+/// The bar across the flow of a container that scrolls both ways.
+fn scrollbar_cross(out: &mut Vec<UiDraw>, n: &Node, color: [u8; 4]) {
+    let row = n.direction == Direction::Row;
+    // Across a column is horizontal, across a row is vertical.
+    let (start, len) = if row {
+        (n.rect.y, n.rect.h)
+    } else {
+        (n.rect.x, n.rect.w)
+    };
+    let pad = if row {
+        n.padding[1] + n.padding[3]
+    } else {
+        n.padding[0] + n.padding[2]
+    };
+    let view = len - pad;
+    if n.content_cross <= view + 0.5 || view <= 0.0 {
+        return;
+    }
+    let thumb = (view * view / n.content_cross).clamp(6.0, view);
+    let t = (n.scroll_offset_cross / (n.content_cross - view)).clamp(0.0, 1.0);
+    let at = start + t * (len - thumb);
+    let r = if row {
+        Rect {
+            x: n.rect.x + n.rect.w - 3.0,
+            y: at,
+            w: 2.0,
+            h: thumb,
+        }
+    } else {
+        Rect {
+            x: at,
+            y: n.rect.y + n.rect.h - 3.0,
+            w: thumb,
+            h: 2.0,
+        }
+    };
+    rect(out, r, color, n.clip);
+}
+
 fn scrollbar(out: &mut Vec<UiDraw>, n: &Node) {
     let row = n.direction == Direction::Row;
     let pad = if row {
@@ -47,6 +274,9 @@ fn scrollbar(out: &mut Vec<UiDraw>, n: &Node) {
     };
     let view = len - pad;
     if n.content <= view + 0.5 || view <= 0.0 {
+        if n.scroll_cross {
+            scrollbar_cross(out, n, [200, 205, 215, 160]);
+        }
         return;
     }
     let thumb = (view * view / n.content).clamp(6.0, view);
@@ -78,6 +308,9 @@ fn scrollbar(out: &mut Vec<UiDraw>, n: &Node) {
         }
     };
     rect(out, r, color, n.clip);
+    if n.scroll_cross {
+        scrollbar_cross(out, n, color);
+    }
 }
 
 fn clip4(c: Option<Rect>) -> Option<[f32; 4]> {
@@ -236,6 +469,38 @@ fn node(out: &mut Vec<UiDraw>, n: &Node, fade: f32) {
         }
         _ => {}
     }
+    if let Some(v) = &n.viewport {
+        viewport(out, n, v, fade);
+    }
+    if n.svg_error {
+        rect(out, r, [255, 0, 255, 255], clip);
+    }
+    if let Some(svg) = &n.svg {
+        let content = Rect {
+            x: r.x + n.padding[0],
+            y: r.y + n.padding[1],
+            w: (r.w - n.padding[0] - n.padding[2]).max(0.0),
+            h: (r.h - n.padding[1] - n.padding[3]).max(0.0),
+        };
+        let bounds = clip.map_or(r, |c| r.intersect(&c));
+        for d in crate::svg::draw(
+            svg,
+            [content.x, content.y],
+            [content.w, content.h],
+            clip4(Some(bounds)),
+        ) {
+            out.push(match d {
+                UiDraw::Triangle { pts, colors } => UiDraw::Triangle {
+                    pts,
+                    colors: colors.map(|c| faded(c, fade)),
+                },
+                other => other,
+            });
+        }
+    }
+    if let Some(sh) = &n.shape {
+        shape(out, n, sh, fade);
+    }
     if let Some(im) = &n.image {
         let content = Rect {
             x: r.x + n.padding[0],
@@ -268,6 +533,7 @@ fn node(out: &mut Vec<UiDraw>, n: &Node, fade: f32) {
         let visible = text_clip.is_none_or(|c| c.w > 0.0 && c.h > 0.0);
         if visible {
             out.push(UiDraw::Text {
+                style: 0,
                 pos: [r.x + n.padding[0], r.y + n.padding[1]],
                 text: n.lines.clone(),
                 scale: n.text_scale,
@@ -329,15 +595,16 @@ fn rich_text(out: &mut Vec<UiDraw>, n: &Node, c4: &dyn Fn(u32) -> [u8; 4], clip:
             }
             let shown = text.trim_end().to_string();
             if !shown.is_empty() {
-                for dx in if st.bold { vec![0.0, s] } else { vec![0.0] } {
-                    out.push(UiDraw::Text {
-                        pos: [x + dx, y],
-                        text: shown.clone(),
-                        scale: s,
-                        color,
-                        clip: clip4(clip),
-                    });
-                }
+                // Bold and italic are a style: a face with styled glyphs draws
+                // them, and the built-in face strikes bold twice.
+                out.push(UiDraw::Text {
+                    pos: [x, y],
+                    text: shown.clone(),
+                    scale: s,
+                    color,
+                    clip: clip4(clip),
+                    style: (u8::from(st.bold) * STYLE_BOLD) | (u8::from(st.italic) * STYLE_ITALIC),
+                });
             }
             if st.link != 0 {
                 let w = shown.chars().count() as f32 * adv;
@@ -398,6 +665,7 @@ fn text_field(
             let mut dim = color;
             dim[3] /= 2;
             out.push(UiDraw::Text {
+                style: 0,
                 pos: [x0, y0],
                 text: n.field.placeholder.clone(),
                 scale: s,
@@ -418,6 +686,7 @@ fn text_field(
                 .take(rw.end - rw.start)
                 .collect();
             out.push(UiDraw::Text {
+                style: 0,
                 pos: at(row, 0),
                 text: line.trim_end_matches(['\n']).to_string(),
                 scale: s,
@@ -456,6 +725,43 @@ fn text_field(
         h: UI_GLYPH[1] * s,
     };
     rect(out, bar, color, clip);
+    // An input method's pre-edit text sits at the caret, underlined, over
+    // what follows until it is committed.
+    if !n.field.preedit.is_empty() {
+        let width = n.field.preedit.chars().count() as f32 * adv;
+        let mut back = accent;
+        back[3] = 0x33;
+        rect(
+            out,
+            Rect {
+                x,
+                y,
+                w: width,
+                h: lh,
+            },
+            back,
+            clip,
+        );
+        out.push(UiDraw::Text {
+            style: 0,
+            pos: [x, y],
+            text: n.field.preedit.clone(),
+            scale: s,
+            color,
+            clip: clip4(clip),
+        });
+        rect(
+            out,
+            Rect {
+                x,
+                y: y + UI_GLYPH[1] * s + (s / 2.0).floor(),
+                w: width,
+                h: s.max(1.0),
+            },
+            color,
+            clip,
+        );
+    }
 }
 
 /// Draw commands back to front for the whole tree. A scroll container's
@@ -551,6 +857,7 @@ mod tests {
                     color: [0x40, 0x40, 0x40, 0xff]
                 },
                 UiDraw::Text {
+                    style: 0,
                     pos: [2.0, 2.0],
                     text: "Go".into(),
                     scale: 1.0,
@@ -1082,5 +1389,151 @@ mod tests {
         });
         let d = one(n, 20.0, 20.0);
         assert!(matches!(&d[0], UiDraw::Rect { color, .. } if *color == [0x80, 0x80, 0x80, 0xff]));
+    }
+
+    fn corners(f: &UiFrame) -> Vec<[f32; 2]> {
+        f.draws
+            .iter()
+            .flat_map(|d| match d {
+                UiDraw::Triangle { pts, .. } => pts.to_vec(),
+                _ => vec![],
+            })
+            .collect()
+    }
+
+    #[test]
+    fn a_polygon_is_cut_to_a_rectangle_and_a_fan_covers_what_is_left() {
+        let r = [0.0, 0.0, 10.0, 10.0];
+        // Entirely inside: unchanged. Entirely outside: gone.
+        let tri = [[1.0, 1.0], [9.0, 1.0], [1.0, 9.0]];
+        let mut same = clip_polygon(&tri, r);
+        same.sort_by(|a, b| a.partial_cmp(b).unwrap());
+        assert_eq!(same, [[1.0, 1.0], [1.0, 9.0], [9.0, 1.0]]);
+        assert!(clip_polygon(&[[20.0, 20.0], [30.0, 20.0], [20.0, 30.0]], r).is_empty());
+        // Across the right edge: every point lands inside, and the area is
+        // the part that was inside (a 10x10 square less a corner).
+        let big = [[5.0, -5.0], [25.0, -5.0], [25.0, 15.0], [5.0, 15.0]];
+        let cut = clip_polygon(&big, r);
+        assert!(
+            cut.iter()
+                .all(|p| (0.0..=10.0).contains(&p[0]) && (0.0..=10.0).contains(&p[1]))
+        );
+        let area: f32 = (0..cut.len())
+            .map(|k| {
+                let (a, b) = (cut[k], cut[(k + 1) % cut.len()]);
+                a[0] * b[1] - b[0] * a[1]
+            })
+            .sum::<f32>()
+            / 2.0;
+        assert!((area.abs() - 50.0).abs() < 1e-3, "{area}");
+    }
+
+    #[test]
+    fn a_line_is_a_thick_quad_and_a_shape_never_leaves_its_node() {
+        let canvas = |shape: ShapeNode| {
+            let mut t = Tree {
+                nodes: vec![Node {
+                    id: 1,
+                    width: Size::Fixed(20.0),
+                    height: Size::Fixed(10.0),
+                    shape: Some(shape),
+                    ..Node::default()
+                }],
+            };
+            layout(&mut t, [20.0, 10.0]);
+            draw(&t, [20.0, 10.0])
+        };
+        let line = canvas(ShapeNode {
+            kind: 1,
+            pts: [[2.0, 5.0], [12.0, 5.0], [0.0; 2]],
+            width: 4.0,
+            color: 0xff00_00ff,
+        });
+        let c = corners(&line);
+        assert_eq!(c.len(), 6, "a quad is two triangles");
+        let (lo, hi) = (
+            c.iter().map(|p| p[1]).fold(f32::MAX, f32::min),
+            c.iter().map(|p| p[1]).fold(f32::MIN, f32::max),
+        );
+        assert_eq!((lo, hi), (3.0, 7.0), "four units thick, centered on y 5");
+        // A line that runs far outside is cut at the box.
+        let out = canvas(ShapeNode {
+            kind: 1,
+            pts: [[0.0, 5.0], [500.0, 5.0], [0.0; 2]],
+            width: 20.0,
+            color: 0xff00_00ff,
+        });
+        assert!(
+            corners(&out)
+                .iter()
+                .all(|p| p[0] <= 20.0 && (0.0..=10.0).contains(&p[1]))
+        );
+        // An ellipse is a fan; a transparent shape draws nothing.
+        let ellipse = canvas(ShapeNode {
+            kind: 3,
+            pts: [[10.0, 5.0], [4.0, 4.0], [0.0; 2]],
+            width: 0.0,
+            color: 0x00ff_00ff,
+        });
+        assert!(corners(&ellipse).len() >= 30);
+        let clear = canvas(ShapeNode {
+            kind: 2,
+            pts: [[0.0; 2], [5.0, 0.0], [0.0, 5.0]],
+            width: 0.0,
+            color: 0xff00_0000,
+        });
+        assert!(clear.draws.is_empty());
+    }
+
+    #[test]
+    fn a_viewport_letterboxes_the_world_and_draws_it_y_up() {
+        use sage_core::StableId;
+        use sage_core::host::{DrawKind, DrawRect, Frame};
+        let r = Rect {
+            x: 10.0,
+            y: 20.0,
+            w: 200.0,
+            h: 100.0,
+        };
+        // A 100x100 world in a 200x100 box: scale 1, centered sideways.
+        assert_eq!(viewport_fit(r, [100.0, 100.0]), (1.0, [60.0, 20.0]));
+        assert_eq!(viewport_fit(r, [400.0, 100.0]), (0.5, [10.0, 45.0]));
+        let frame = Frame {
+            tick: 0,
+            world_size: [100.0, 100.0],
+            rects: vec![DrawRect {
+                id: StableId(1),
+                kind: DrawKind::Ball,
+                center: [10.0, 10.0],
+                half: [5.0, 5.0],
+            }],
+            hud: vec!["HI".into()],
+        };
+        let mut t = Tree {
+            nodes: vec![Node {
+                id: 1,
+                width: Size::Fixed(200.0),
+                height: Size::Fixed(100.0),
+                viewport: Some(ViewportNode {
+                    frame: Some(frame),
+                    ..ViewportNode::default()
+                }),
+                ..Node::default()
+            }],
+        };
+        layout(&mut t, [200.0, 100.0]);
+        let f = draw(&t, [200.0, 100.0]);
+        // The world is centered (50 units in from each side) and y points up:
+        // the ball spans world y 5..15, so its top edge is 85 from the top.
+        assert!(
+            f.draws.contains(&UiDraw::Rect {
+                pos: [55.0, 85.0],
+                size: [10.0, 10.0],
+                color: [255, 200, 60, 255],
+            }),
+            "{:?}",
+            f.draws
+        );
+        assert_eq!(texts(&f), vec!["HI"]);
     }
 }

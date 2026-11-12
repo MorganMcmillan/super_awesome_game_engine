@@ -22,6 +22,8 @@ struct Voice {
     volume: f32,
     pitch: f32,
     looping: bool,
+    /// A paused voice keeps its place and makes no sound.
+    paused: bool,
 }
 
 pub struct Mixer {
@@ -64,8 +66,44 @@ impl Mixer {
             volume,
             pitch: pitch.max(0.01),
             looping,
+            paused: false,
         });
         id
+    }
+
+    fn voice_mut(&mut self, id: VoiceId) -> Option<&mut Voice> {
+        self.voices.iter_mut().find(|v| v.id == id)
+    }
+
+    /// Pauses or resumes a voice, keeping its place. False if it is gone.
+    pub fn set_paused(&mut self, id: VoiceId, paused: bool) -> bool {
+        self.voice_mut(id).map(|v| v.paused = paused).is_some()
+    }
+
+    pub fn set_volume(&mut self, id: VoiceId, volume: f32) -> bool {
+        self.voice_mut(id).map(|v| v.volume = volume).is_some()
+    }
+
+    /// Moves a voice to `seconds` into its sound (clamped to the sound).
+    pub fn seek(&mut self, id: VoiceId, seconds: f64) -> bool {
+        self.voice_mut(id)
+            .map(|v| {
+                let last = v.sound.samples.len().saturating_sub(1) as f64;
+                v.pos = (seconds * f64::from(v.sound.sample_rate)).clamp(0.0, last);
+            })
+            .is_some()
+    }
+
+    /// Where a voice is in its sound, in seconds; `None` once it is gone.
+    pub fn position(&self, id: VoiceId) -> Option<f64> {
+        self.voices
+            .iter()
+            .find(|v| v.id == id)
+            .map(|v| v.pos / f64::from(v.sound.sample_rate))
+    }
+
+    pub fn is_playing(&self, id: VoiceId) -> bool {
+        self.voices.iter().any(|v| v.id == id && !v.paused)
     }
 
     pub fn stop(&mut self, id: VoiceId) {
@@ -83,7 +121,7 @@ impl Mixer {
         let out_rate = f64::from(self.out_rate);
         for v in &mut self.voices {
             let len = v.sound.samples.len();
-            if len == 0 {
+            if len == 0 || v.paused {
                 continue;
             }
             let step = f64::from(v.sound.sample_rate) / out_rate * f64::from(v.pitch);
@@ -111,7 +149,7 @@ impl Mixer {
             }
         }
         self.voices
-            .retain(|v| v.looping || v.pos < v.sound.samples.len() as f64);
+            .retain(|v| v.paused || v.looping || v.pos < v.sound.samples.len() as f64);
         for s in &mut out {
             *s = s.clamp(-1.0, 1.0);
         }
@@ -207,5 +245,45 @@ mod tests {
         assert_eq!(m.voice_count(), MAX_VOICES);
         m.stop(first); // already gone: stopping again is harmless
         assert_eq!(m.voice_count(), MAX_VOICES);
+    }
+
+    #[test]
+    fn a_paused_voice_keeps_its_place_and_is_silent_until_resumed() {
+        let mut m = Mixer::new(1000);
+        let id = m.play(dc(1000, 100, 0.5), 1.0, 1.0, false);
+        m.mix(10);
+        assert!((m.position(id).unwrap() - 0.010).abs() < 1e-9);
+        assert!(m.set_paused(id, true));
+        assert!(!m.is_playing(id));
+        assert!(m.mix(10).iter().all(|s| *s == 0.0), "silent while paused");
+        assert!(
+            (m.position(id).unwrap() - 0.010).abs() < 1e-9,
+            "it did not move"
+        );
+        m.set_paused(id, false);
+        assert!(m.mix(5).iter().all(|s| *s == 0.5));
+        assert!((m.position(id).unwrap() - 0.015).abs() < 1e-9);
+    }
+
+    #[test]
+    fn seek_moves_a_voice_and_volume_changes_while_it_plays() {
+        let mut m = Mixer::new(1000);
+        let id = m.play(dc(1000, 100, 0.5), 1.0, 1.0, false);
+        assert!(m.seek(id, 0.095));
+        let out = m.mix(10);
+        assert_eq!(out[0], 0.5);
+        assert_eq!(out[10], 0.0, "five frames were left, then silence");
+        assert_eq!(m.voice_count(), 0, "it finished");
+        assert_eq!(m.position(id), None);
+        assert!(!m.seek(id, 0.0) && !m.set_paused(id, true) && !m.set_volume(id, 1.0));
+        let id = m.play(dc(1000, 100, 1.0), 1.0, 1.0, true);
+        assert!(m.set_volume(id, 0.25));
+        assert_eq!(m.mix(1)[0], 0.25);
+        m.seek(id, 99.0); // clamped to the last sample
+        assert!(m.position(id).unwrap() <= 0.099);
+        // A paused voice that reaches nowhere is not collected.
+        m.set_paused(id, true);
+        m.mix(500);
+        assert_eq!(m.voice_count(), 1);
     }
 }

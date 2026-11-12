@@ -2,7 +2,7 @@
 # text area that wraps and scrolls; number fields.
 
 import sage
-from sage.ui import Changed, Label, Navigate, Slider, Submitted, TextChanged
+from sage.ui import Caret, Changed, Label, Navigate, Slider, Submitted, TextChanged, TextField
 
 ui = world.ui
 T = world.theme
@@ -28,7 +28,7 @@ ui.heading(rich_card, "SECTION", 2)
 ui.heading(rich_card, "SUBSECTION", 3)
 paragraph = ui.rich(
     rich_card,
-    "A PARAGRAPH CAN BE **BOLD**, HAVE `CODE`, {#4FC3C0 TINTED} WORDS AND A [LINK](PAGE:TEXT) IN IT.",
+    "A PARAGRAPH CAN BE **BOLD**, HAVE `CODE`, {#4FC3C0 TINTED} AND *SLANTED* WORDS AND A [LINK](PAGE:TEXT) IN IT.",
     prefab=T.Rich,
 )
 link_said = ui.add(T.Body, rich_card, text="CLICKED: NOTHING")

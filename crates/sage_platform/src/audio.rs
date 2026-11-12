@@ -12,7 +12,9 @@ use sdl3::audio::{AudioFormat, AudioSpec, AudioStreamOwner};
 
 use crate::mixer::Mixer;
 
-const RATE: u32 = 48_000;
+/// The rate the output device runs at, for an app that mixes its own audio.
+pub const OUT_RATE: u32 = 48_000;
+const RATE: u32 = OUT_RATE;
 const TARGET_QUEUE_SECS: f32 = 0.06;
 
 pub struct AudioOut {
@@ -63,6 +65,18 @@ impl AudioOut {
 
     pub fn mixer(&mut self) -> &mut Mixer {
         &mut self.mixer
+    }
+
+    /// How many stereo frames the device queue could take now to be topped up
+    /// (0 when it holds enough).
+    pub fn wanted_frames(&self) -> usize {
+        let queued = self.stream.queued_bytes().unwrap_or(0) as usize / 8;
+        ((RATE as f32 * TARGET_QUEUE_SECS) as usize).saturating_sub(queued)
+    }
+
+    /// Queues interleaved stereo samples an app mixed itself.
+    pub fn push(&mut self, samples: &[f32]) -> Result<(), String> {
+        self.stream.put_data_f32(samples).map_err(|e| e.to_string())
     }
 
     /// Tops up the device queue. Call at least every few frames.

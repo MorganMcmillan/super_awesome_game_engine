@@ -28,7 +28,7 @@ pub const MAX_TEXT: usize = 256;
 pub const SCROLL_STEP: f32 = 12.0;
 
 /// What the UI remembers between ticks. Ids are StableIds; 0 is "none".
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
 pub struct UiState {
     pub hot: u64,
     pub active: u64,
@@ -36,9 +36,51 @@ pub struct UiState {
     pub prev_down: bool,
     pub prev_secondary: bool,
     pub prev_nav: u32,
+    pub prev_middle: bool,
+    /// The middle button went down over this node (0 for none).
+    pub middle_active: u64,
+    /// A drag and drop that began with a press (see [`Dnd`]).
+    pub dnd: Dnd,
+    /// The last primary press (click counting).
+    pub last_press: LastPress,
+    /// The rich-text link (1 + its index) the primary press began on, 0 for
+    /// none; a click on a link needs the release on the same one.
+    pub press_link: u32,
     /// Output of the last `update`: some scroll offset changed, so the tree
     /// needs another `layout` before it is drawn. Not carried between ticks.
     pub scrolled: bool,
+}
+
+/// How far the pointer must move after a press on a draggable node before
+/// the drag starts, in UI units. A smaller movement is still a click.
+pub const DRAG_THRESHOLD: f32 = 4.0;
+
+/// Ticks within which a second press counts as a double click, and how far
+/// (in UI units) the pointer may have moved.
+pub const DOUBLE_CLICK_TICKS: u64 = 20;
+pub const DOUBLE_CLICK_DIST: f32 = 4.0;
+
+/// The last primary press, for counting clicks.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct LastPress {
+    /// Ticks since the press, stopping at `DOUBLE_CLICK_TICKS + 1` so an idle
+    /// UI's state does not change from tick to tick.
+    pub age: u32,
+    pub pos: [f32; 2],
+    pub id: u64,
+    /// 1 for a single click, 2 for a double, 3 for a triple.
+    pub count: u32,
+}
+
+/// A press on a draggable node, followed through to its drop.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct Dnd {
+    /// The node that is pressed or dragged (0 for none).
+    pub source: u64,
+    /// Where the pointer was at the press.
+    pub origin: [f32; 2],
+    /// The pointer has moved far enough: this is a drag, not a click.
+    pub dragging: bool,
 }
 
 #[derive(Clone, Debug, Default, PartialEq)]
@@ -49,8 +91,15 @@ pub struct UiInput {
     pub down: bool,
     /// The secondary (right) button is held.
     pub secondary: bool,
+    /// The middle button is held.
+    pub middle: bool,
     /// `NAV_*` bits held this tick.
     pub nav: u32,
+    /// An action from assistive technology: the node's StableId and what to
+    /// do (1 focus it, 2 click it).
+    pub access: Option<(u64, u32)>,
+    /// A key chord pressed this tick: the key and its `CHORD_*` modifiers.
+    pub chord: Option<[u32; 2]>,
     /// A character typed this tick.
     pub ch: Option<char>,
     /// Wheel notches this tick; positive scrolls the content down (towards
@@ -75,6 +124,18 @@ pub enum EventKind {
     ContextRequested(f32, f32),
     /// A link in rich text was clicked: its target.
     Navigate(String),
+    /// The middle button was pressed and released over the node.
+    MiddleClicked,
+    /// A draggable node was picked up (its payload).
+    DragStarted(u64),
+    /// A drag was released over a node that accepts it: the source node's id
+    /// and its payload. The event's target is the drop target.
+    Dropped(u64, u64),
+    /// A drag ended (on the source node): true if it was dropped on a target.
+    DragEnded(bool),
+    /// A handle is being dragged: phase 0 pressed, 1 moving, 2 released, and
+    /// the pointer's movement since the press.
+    Drag(u32, f32, f32),
     /// A copy or cut: this text goes on the clipboard.
     Copied(String),
 }
@@ -122,6 +183,27 @@ fn scroll_by(tree: &mut Tree, i: usize, delta: f32) -> bool {
     let next = (n.scroll_offset + delta).clamp(0.0, max);
     let moved = next != n.scroll_offset;
     n.scroll_offset = next;
+    moved
+}
+
+/// Scrolls container `i` across its flow by `delta` units, clamped.
+fn scroll_cross_by(tree: &mut Tree, i: usize, delta: f32) -> bool {
+    let n = &tree.nodes[i];
+    let pad = if n.direction == Direction::Row {
+        n.padding[1] + n.padding[3]
+    } else {
+        n.padding[0] + n.padding[2]
+    };
+    let view = if n.direction == Direction::Row {
+        n.rect.h
+    } else {
+        n.rect.w
+    } - pad;
+    let max = (n.content_cross - view).max(0.0);
+    let n = &mut tree.nodes[i];
+    let next = (n.scroll_offset_cross + delta).clamp(0.0, max);
+    let moved = next != n.scroll_offset_cross;
+    n.scroll_offset_cross = next;
     moved
 }
 
@@ -317,7 +399,7 @@ fn tab_order(tree: &Tree, order: &[usize]) -> Vec<usize> {
 fn activate(tree: &mut Tree, i: usize, events: &mut Vec<UiEvent>) {
     let id = tree.nodes[i].id;
     match tree.nodes[i].widget {
-        Widget::Button => events.push(UiEvent {
+        Widget::Button | Widget::Label => events.push(UiEvent {
             target: id,
             kind: EventKind::Clicked,
         }),
@@ -593,6 +675,9 @@ pub fn update(tree: &mut Tree, st: &mut UiState, input: &UiInput) -> Vec<UiEvent
     let mut events = vec![];
     let order = tree.draw_order();
     st.scrolled = false;
+    if st.last_press.count > 0 {
+        st.last_press.age = (st.last_press.age + 1).min(DOUBLE_CLICK_TICKS as u32 + 1);
+    }
     let focus_before = st.focus;
 
     // Forget ids that no longer exist or can no longer be used.
@@ -624,13 +709,47 @@ pub fn update(tree: &mut Tree, st: &mut UiState, input: &UiInput) -> Vec<UiEvent
         match target {
             Some(i) => {
                 st.active = tree.nodes[i].id;
+                if tree.nodes[i].widget == Widget::Handle
+                    && let Some(p) = input.pointer
+                {
+                    tree.nodes[i].drag = Some(p);
+                    events.push(UiEvent {
+                        target: st.active,
+                        kind: EventKind::Drag(0, 0.0, 0.0),
+                    });
+                }
                 if tree.nodes[i].widget == Widget::TextInput
                     && let Some(p) = input.pointer
                 {
+                    let near = st.last_press.id == st.active
+                        && u64::from(st.last_press.age) <= DOUBLE_CLICK_TICKS
+                        && (p[0] - st.last_press.pos[0]).abs() <= DOUBLE_CLICK_DIST
+                        && (p[1] - st.last_press.pos[1]).abs() <= DOUBLE_CLICK_DIST;
+                    let count = if near { st.last_press.count % 3 + 1 } else { 1 };
+                    st.last_press = LastPress {
+                        age: 0,
+                        pos: p,
+                        id: st.active,
+                        count,
+                    };
                     let n = &mut tree.nodes[i];
                     n.caret = index_at_point(n, p);
                     if input.nav & NAV_SHIFT == 0 {
                         n.field.anchor = n.caret;
+                    }
+                    // A double click selects the word under it, a triple click
+                    // the line.
+                    match count {
+                        2 => {
+                            let end = crate::text::word_right(&n.text, n.caret);
+                            let start = crate::text::word_left(&n.text, end);
+                            (n.field.anchor, n.caret) = (start, end);
+                        }
+                        3 => {
+                            let (start, end) = crate::text::line_bounds(&n.text, n.caret);
+                            (n.field.anchor, n.caret) = (start, end);
+                        }
+                        _ => {}
                     }
                     n.field.want = usize::MAX;
                     scroll_into_view(n);
@@ -656,10 +775,18 @@ pub fn update(tree: &mut Tree, st: &mut UiState, input: &UiInput) -> Vec<UiEvent
             kind: EventKind::Changed(tree.nodes[i].value),
         });
     }
-    // A click on a link in rich text.
+    // Remember which link the press began on.
+    if press {
+        st.press_link = match (input.pointer, hit) {
+            (Some(p), Some(i)) => link_at(&tree.nodes[i], p).map_or(0, |l| l as u32),
+            _ => 0,
+        };
+    }
+    // A click on a link in rich text: press and release on the same link.
     if release
         && let (Some(p), Some(i)) = (input.pointer, find(tree, st.hot))
         && let Some(l) = link_at(&tree.nodes[i], p)
+        && st.press_link == l as u32
     {
         let target = tree.nodes[i].rich.as_ref().unwrap().links[l - 1].clone();
         events.push(UiEvent {
@@ -677,12 +804,160 @@ pub fn update(tree: &mut Tree, st: &mut UiState, input: &UiInput) -> Vec<UiEvent
         n.caret = index_at_point(n, p);
         scroll_into_view(n);
     }
+    if let (Some(p), Some(i)) = (input.pointer, find(tree, st.active))
+        && tree.nodes[i].widget == Widget::Handle
+        && let Some(o) = tree.nodes[i].drag
+        && (input.down || release)
+    {
+        let phase = if release { 2 } else { 1 };
+        if release || !press {
+            events.push(UiEvent {
+                target: tree.nodes[i].id,
+                kind: EventKind::Drag(phase, p[0] - o[0], p[1] - o[1]),
+            });
+        }
+        if release {
+            tree.nodes[i].drag = None;
+        }
+    }
+    // Drag and drop: a press on a draggable node (or inside one) becomes a
+    // drag once the pointer has moved a few units, which also cancels the
+    // click the press would have been.
+    let under = |tree: &Tree, p: [f32; 2]| {
+        order.iter().rev().copied().find(|&i| {
+            let n = &tree.nodes[i];
+            n.rect.contains(p) && n.clip.is_none_or(|c| c.contains(p))
+        })
+    };
+    let ancestor_where = |tree: &Tree, from: Option<usize>, test: &dyn Fn(&Node) -> bool| {
+        let mut at = from;
+        for _ in 0..64 {
+            let i = at?;
+            if test(&tree.nodes[i]) {
+                return Some(i);
+            }
+            at = parent_of(tree, i);
+        }
+        None
+    };
+    if press {
+        st.dnd = Dnd::default();
+        if let Some(p) = input.pointer
+            && let Some(i) = ancestor_where(tree, under(tree, p), &|n| {
+                n.draggable.is_some() && n.enabled
+            })
+        {
+            st.dnd = Dnd {
+                source: tree.nodes[i].id,
+                origin: p,
+                dragging: false,
+            };
+        }
+    }
+    let mut over = None;
+    if st.dnd.source != 0 {
+        let source = find(tree, st.dnd.source);
+        let kind = source.and_then(|i| tree.nodes[i].draggable).map(|d| d.1);
+        if source.is_none() || !(input.down || release) {
+            // The source is gone, or the button was already up.
+            st.dnd = Dnd::default();
+        } else if let (Some(p), Some(i), Some(kind)) = (input.pointer, source, kind) {
+            let d = [p[0] - st.dnd.origin[0], p[1] - st.dnd.origin[1]];
+            if !st.dnd.dragging && (d[0] * d[0] + d[1] * d[1]).sqrt() > DRAG_THRESHOLD {
+                st.dnd.dragging = true;
+                st.active = 0;
+                events.push(UiEvent {
+                    target: st.dnd.source,
+                    kind: EventKind::DragStarted(tree.nodes[i].draggable.unwrap().0),
+                });
+            }
+            if st.dnd.dragging {
+                over = ancestor_where(tree, under(tree, p), &|n| {
+                    n.drop_kinds & (1u32 << (kind & 31)) != 0 && n.enabled
+                });
+                let cancel = input.nav & !st.prev_nav & NAV_CANCEL != 0;
+                if release || cancel {
+                    let dropped = release && !cancel && over.is_some();
+                    if dropped {
+                        events.push(UiEvent {
+                            target: tree.nodes[over.unwrap()].id,
+                            kind: EventKind::Dropped(
+                                st.dnd.source,
+                                tree.nodes[i].draggable.unwrap().0,
+                            ),
+                        });
+                    }
+                    events.push(UiEvent {
+                        target: st.dnd.source,
+                        kind: EventKind::DragEnded(dropped),
+                    });
+                    st.dnd = Dnd::default();
+                    over = None;
+                }
+            } else if release {
+                st.dnd = Dnd::default();
+            }
+        } else if release {
+            st.dnd = Dnd::default();
+        }
+    }
+    for (k, n) in tree.nodes.iter_mut().enumerate() {
+        n.drop_over = Some(k) == over;
+    }
+    // The middle button reports a click on release over the node it began on.
+    let middle_press = input.middle && !st.prev_middle;
+    if middle_press {
+        st.middle_active = hit.map_or(0, |i| tree.nodes[i].id);
+    }
+    if !input.middle && st.prev_middle {
+        if st.middle_active != 0 && st.middle_active == st.hot {
+            events.push(UiEvent {
+                target: st.middle_active,
+                kind: EventKind::MiddleClicked,
+            });
+        }
+        st.middle_active = 0;
+    }
+    // Assistive technology can focus a control or press it, as the pointer
+    // and keyboard would.
+    if let Some((id, kind)) = input.access
+        && let Some(i) = find(tree, id)
+        && live[i]
+        && tree.nodes[i].enabled
+        && interactive(tree.nodes[i].widget)
+    {
+        if tree.nodes[i].widget.focusable() && st.focus != id {
+            st.focus = id;
+            events.push(UiEvent {
+                target: id,
+                kind: EventKind::Focused,
+            });
+        }
+        if kind == 2 {
+            activate(tree, i, &mut events);
+        }
+    }
+    // A key chord clicks the node that has it as a shortcut, unless a modal
+    // is open and the node is outside it.
+    if let Some(chord) = input.chord {
+        let modal = topmost_modal(tree, &order);
+        let found = order.iter().rev().copied().find(|&i| {
+            let n = &tree.nodes[i];
+            n.shortcut == Some(chord)
+                && n.enabled
+                && live[i]
+                && modal.is_none_or(|m| within(tree, i, m))
+        });
+        if let Some(i) = found {
+            activate(tree, i, &mut events);
+        }
+    }
     if release {
         if let Some(i) = find(tree, st.active)
             && st.hot == st.active
             && matches!(
                 tree.nodes[i].widget,
-                Widget::Button | Widget::Toggle | Widget::Choice
+                Widget::Button | Widget::Toggle | Widget::Choice | Widget::Label
             )
         {
             activate(tree, i, &mut events);
@@ -766,7 +1041,12 @@ pub fn update(tree: &mut Tree, st: &mut UiState, input: &UiInput) -> Vec<UiEvent
     } else if input.wheel != 0.0
         && let Some(i) = container_under(tree)
     {
-        st.scrolled |= scroll_by(tree, i, input.wheel * SCROLL_STEP);
+        // Shift and the wheel scroll across the flow, in a container that can.
+        if input.nav & NAV_SHIFT != 0 && tree.nodes[i].scroll_cross {
+            st.scrolled |= scroll_cross_by(tree, i, input.wheel * SCROLL_STEP);
+        } else {
+            st.scrolled |= scroll_by(tree, i, input.wheel * SCROLL_STEP);
+        }
     }
     let page = (input.nav & !st.prev_nav) & (NAV_PAGE_UP | NAV_PAGE_DOWN);
     if page != 0 {
@@ -859,8 +1139,31 @@ pub fn update(tree: &mut Tree, st: &mut UiState, input: &UiInput) -> Vec<UiEvent
         st.scrolled |= reveal(tree, i);
     }
 
+    // A viewport reports the pointer, where it is over it or being dragged
+    // from it, for the host to forward to the embedded simulation.
+    for n in &mut tree.nodes {
+        if let Some(v) = &mut n.viewport {
+            v.pointer = None;
+            v.buttons = 0;
+        }
+    }
+    if let Some(p) = input.pointer {
+        let held = input.down || input.secondary || input.middle;
+        let grabbed = find(tree, st.active).filter(|&i| held && tree.nodes[i].viewport.is_some());
+        let over =
+            grabbed.or_else(|| find(tree, st.hot).filter(|&i| tree.nodes[i].viewport.is_some()));
+        if let Some(i) = over {
+            let n = &mut tree.nodes[i];
+            if let Some(v) = &mut n.viewport {
+                v.pointer = Some([p[0] - n.rect.x, p[1] - n.rect.y]);
+                v.buttons =
+                    input.down as u32 | (input.secondary as u32) << 1 | (input.middle as u32) << 2;
+            }
+        }
+    }
     st.prev_down = input.down;
     st.prev_secondary = input.secondary;
+    st.prev_middle = input.middle;
     st.prev_nav = input.nav;
     for n in &mut tree.nodes {
         n.hovered = n.id == st.hot && n.widget != Widget::None;
@@ -1140,7 +1443,7 @@ mod tests {
             prev_down: false,
             prev_secondary: false,
             prev_nav: 0,
-            scrolled: false,
+            ..UiState::default()
         };
         update(&mut t, &mut st, &UiInput::default());
         assert_eq!((st.active, st.focus), (0, 0));
@@ -1738,5 +2041,323 @@ mod tests {
         keys_noclick(&mut t, &mut st, 0, Some('-'));
         tick(&mut t, &mut st, &pointer(90.0, 90.0, true));
         assert_eq!(t.nodes[0].text, "10");
+    }
+
+    #[test]
+    fn a_handle_reports_the_drag_from_the_press_and_a_label_clicks_without_focus() {
+        let mut t = Tree {
+            nodes: vec![
+                Node {
+                    id: 9,
+                    ..Node::default()
+                },
+                Node {
+                    id: 1,
+                    parent: Some(0),
+                    width: Size::Fixed(40.0),
+                    height: Size::Fixed(10.0),
+                    widget: Widget::Handle,
+                    ..Node::default()
+                },
+                Node {
+                    id: 2,
+                    parent: Some(0),
+                    width: Size::Fixed(40.0),
+                    height: Size::Fixed(10.0),
+                    widget: Widget::Label,
+                    ..Node::default()
+                },
+            ],
+        };
+        layout(&mut t, [100.0, 100.0]);
+        let mut st = UiState::default();
+        let drags = |e: &[UiEvent]| -> Vec<(u32, f32, f32)> {
+            e.iter()
+                .filter_map(|e| match e.kind {
+                    EventKind::Drag(p, x, y) => Some((p, x, y)),
+                    _ => None,
+                })
+                .collect()
+        };
+        let a = tick(&mut t, &mut st, &pointer(5.0, 5.0, true));
+        assert_eq!(drags(&a), vec![(0, 0.0, 0.0)]);
+        let b = tick(&mut t, &mut st, &pointer(25.0, 8.0, true));
+        assert_eq!(drags(&b), vec![(1, 20.0, 3.0)]);
+        // The drag goes on when the pointer leaves the handle.
+        let c = tick(&mut t, &mut st, &pointer(90.0, 60.0, true));
+        assert_eq!(drags(&c), vec![(1, 85.0, 55.0)]);
+        let d = tick(&mut t, &mut st, &pointer(90.0, 60.0, false));
+        assert_eq!(drags(&d), vec![(2, 85.0, 55.0)]);
+        assert_eq!(
+            drags(&tick(&mut t, &mut st, &pointer(1.0, 1.0, false))),
+            vec![]
+        );
+        assert_eq!(st.focus, 0, "a handle takes no focus");
+        // A label reports a click on release and takes no focus either.
+        tick(&mut t, &mut st, &pointer(5.0, 15.0, true));
+        let e = tick(&mut t, &mut st, &pointer(5.0, 15.0, false));
+        assert!(
+            e.iter()
+                .any(|e| e.kind == EventKind::Clicked && e.target == 2)
+        );
+        assert_eq!(st.focus, 0);
+        assert!(!Widget::Handle.focusable() && !Widget::Label.focusable());
+    }
+
+    /// A draggable button (id 1, payload 7, kind 1) over two drop zones: id 2
+    /// takes kind 1, id 3 only kind 2. Each is 40x20, stacked.
+    fn dnd_tree() -> Tree {
+        let mut nodes = vec![Node {
+            id: 9,
+            ..Node::default()
+        }];
+        for (id, drag, kinds, widget) in [
+            (1, Some((7, 1)), 0, Widget::Button),
+            (2, None, 1 << 1, Widget::None),
+            (3, None, 1 << 2, Widget::None),
+        ] {
+            nodes.push(Node {
+                id,
+                parent: Some(0),
+                width: Size::Fixed(40.0),
+                height: Size::Fixed(20.0),
+                widget,
+                draggable: drag,
+                drop_kinds: kinds,
+                ..Node::default()
+            });
+        }
+        let mut t = Tree { nodes };
+        layout(&mut t, [100.0, 100.0]);
+        t
+    }
+
+    fn kinds(e: &[UiEvent]) -> Vec<(u64, EventKind)> {
+        e.iter().map(|e| (e.target, e.kind.clone())).collect()
+    }
+
+    #[test]
+    fn a_draggable_picks_up_after_a_few_units_and_drops_on_a_zone_that_takes_its_kind() {
+        let mut t = dnd_tree();
+        let mut st = UiState::default();
+        // Press on the button (y 0..20); a small move is still a click.
+        update(&mut t, &mut st, &pointer(5.0, 5.0, true));
+        let e = update(&mut t, &mut st, &pointer(7.0, 5.0, true));
+        assert!(
+            !kinds(&e)
+                .iter()
+                .any(|(_, k)| matches!(k, EventKind::DragStarted(_)))
+        );
+        // Past the threshold the drag starts, and the click is cancelled.
+        let e = update(&mut t, &mut st, &pointer(5.0, 25.0, true));
+        assert_eq!(kinds(&e), vec![(1, EventKind::DragStarted(7))]);
+        assert!(
+            t.nodes[2].drop_over,
+            "zone 2 takes kind 1 and is under the pointer"
+        );
+        // Over zone 3 (kind 2 only) nothing is highlighted.
+        update(&mut t, &mut st, &pointer(5.0, 45.0, true));
+        assert!(!t.nodes[2].drop_over && !t.nodes[3].drop_over);
+        // Back over zone 2 and release: dropped there, no click.
+        update(&mut t, &mut st, &pointer(5.0, 25.0, true));
+        let e = update(&mut t, &mut st, &pointer(5.0, 25.0, false));
+        assert_eq!(
+            kinds(&e),
+            vec![
+                (2, EventKind::Dropped(1, 7)),
+                (1, EventKind::DragEnded(true))
+            ]
+        );
+        assert!(!t.nodes[2].drop_over);
+        assert_eq!(st.dnd, Dnd::default());
+    }
+
+    #[test]
+    fn releasing_a_drag_off_every_zone_or_pressing_escape_drops_nothing() {
+        let mut t = dnd_tree();
+        let mut st = UiState::default();
+        update(&mut t, &mut st, &pointer(5.0, 5.0, true));
+        update(&mut t, &mut st, &pointer(5.0, 45.0, true));
+        let e = update(&mut t, &mut st, &pointer(5.0, 45.0, false));
+        assert_eq!(kinds(&e), vec![(1, EventKind::DragEnded(false))]);
+        // Escape in the middle of a drag cancels it, even over a zone.
+        update(&mut t, &mut st, &pointer(5.0, 5.0, true));
+        update(&mut t, &mut st, &pointer(5.0, 25.0, true));
+        let mut esc = pointer(5.0, 25.0, true);
+        esc.nav = NAV_CANCEL;
+        let e = update(&mut t, &mut st, &esc);
+        assert_eq!(kinds(&e), vec![(1, EventKind::DragEnded(false))]);
+        let e = update(&mut t, &mut st, &pointer(5.0, 25.0, false));
+        assert!(e.is_empty(), "{e:?}");
+    }
+
+    #[test]
+    fn a_press_that_does_not_move_is_still_a_click_on_a_draggable_button() {
+        let mut t = dnd_tree();
+        let mut st = UiState::default();
+        update(&mut t, &mut st, &pointer(5.0, 5.0, true));
+        let e = update(&mut t, &mut st, &pointer(5.0, 5.0, false));
+        assert!(kinds(&e).contains(&(1, EventKind::Clicked)));
+        // And a drag that went past the threshold is not.
+        update(&mut t, &mut st, &pointer(5.0, 5.0, true));
+        update(&mut t, &mut st, &pointer(5.0, 30.0, true));
+        let e = update(&mut t, &mut st, &pointer(5.0, 5.0, false));
+        assert!(!kinds(&e).contains(&(1, EventKind::Clicked)), "{e:?}");
+    }
+
+    #[test]
+    fn the_middle_button_clicks_on_release_over_the_node_it_began_on() {
+        let mut t = menu();
+        let mut st = UiState::default();
+        let mid = |x: f32, y: f32, down: bool| UiInput {
+            pointer: Some([x, y]),
+            middle: down,
+            ..UiInput::default()
+        };
+        update(&mut t, &mut st, &mid(5.0, 5.0, true));
+        let e = update(&mut t, &mut st, &mid(5.0, 5.0, false));
+        assert_eq!(kinds(&e), vec![(10, EventKind::MiddleClicked)]);
+        update(&mut t, &mut st, &mid(5.0, 5.0, true));
+        let e = update(&mut t, &mut st, &mid(5.0, 45.0, false));
+        assert!(e.is_empty(), "released elsewhere: {e:?}");
+    }
+
+    #[test]
+    fn a_shortcut_chord_clicks_its_node_and_ignores_a_disabled_one() {
+        let mut t = menu();
+        t.nodes[1].shortcut = Some([b'S' as u32, 1]);
+        t.nodes[2].shortcut = Some([b'T' as u32, 1]);
+        let mut st = UiState::default();
+        let chord = |k: u8| UiInput {
+            chord: Some([k as u32, 1]),
+            ..UiInput::default()
+        };
+        let e = update(&mut t, &mut st, &chord(b'S'));
+        assert_eq!(kinds(&e), vec![(10, EventKind::Clicked)]);
+        // A toggle's shortcut flips it.
+        let e = update(&mut t, &mut st, &chord(b'T'));
+        assert_eq!(kinds(&e), vec![(11, EventKind::Toggled(true))]);
+        assert!(update(&mut t, &mut st, &chord(b'Z')).is_empty());
+        t.nodes[1].enabled = false;
+        assert!(update(&mut t, &mut st, &chord(b'S')).is_empty());
+    }
+
+    #[test]
+    fn a_viewport_reports_the_pointer_over_it_and_while_dragging_from_it() {
+        use crate::layout::ViewportNode;
+        let mut t = Tree {
+            nodes: vec![
+                Node {
+                    id: 9,
+                    ..Node::default()
+                },
+                Node {
+                    id: 1,
+                    parent: Some(0),
+                    width: Size::Fixed(50.0),
+                    height: Size::Fixed(40.0),
+                    widget: Widget::Viewport,
+                    viewport: Some(ViewportNode::default()),
+                    ..Node::default()
+                },
+            ],
+        };
+        layout(&mut t, [100.0, 100.0]);
+        let mut st = UiState::default();
+        let at = |t: &Tree| {
+            (
+                t.nodes[1].viewport.as_ref().unwrap().pointer,
+                t.nodes[1].viewport.as_ref().unwrap().buttons,
+            )
+        };
+        update(&mut t, &mut st, &pointer(70.0, 5.0, false));
+        assert_eq!(at(&t), (None, 0), "outside the view");
+        update(&mut t, &mut st, &pointer(20.0, 10.0, false));
+        assert_eq!(at(&t), (Some([20.0, 10.0]), 0));
+        // A press focuses it and reports the button; it keeps reporting when
+        // the pointer leaves while the button is held, and stops on release.
+        let e = update(&mut t, &mut st, &pointer(20.0, 10.0, true));
+        assert_eq!(at(&t), (Some([20.0, 10.0]), 1));
+        assert!(kinds(&e).contains(&(1, EventKind::Focused)));
+        update(&mut t, &mut st, &pointer(90.0, 80.0, true));
+        assert_eq!(at(&t), (Some([90.0, 80.0]), 1), "dragged out of the view");
+        update(&mut t, &mut st, &pointer(90.0, 80.0, false));
+        assert_eq!(at(&t), (None, 0));
+        assert!(Widget::Viewport.focusable());
+    }
+
+    /// One text input, 200 wide, holding `text`; returns the tree.
+    fn field_with(text: &str) -> Tree {
+        let mut t = Tree {
+            nodes: vec![
+                Node {
+                    id: 9,
+                    ..Node::default()
+                },
+                Node {
+                    id: 1,
+                    parent: Some(0),
+                    width: Size::Fixed(200.0),
+                    height: Size::Fixed(12.0),
+                    widget: Widget::TextInput,
+                    text: text.into(),
+                    text_scale: 1.0,
+                    ..Node::default()
+                },
+            ],
+        };
+        layout(&mut t, [300.0, 100.0]);
+        t
+    }
+
+    fn click_at(t: &mut Tree, st: &mut UiState, x: f32) {
+        update(t, st, &pointer(x, 5.0, true));
+        update(t, st, &pointer(x, 5.0, false));
+    }
+
+    #[test]
+    fn a_double_click_selects_a_word_a_triple_click_the_line_and_time_or_distance_resets_it() {
+        let mut t = field_with("hello big world");
+        let mut st = UiState::default();
+        // Characters are 6 wide: "big" is characters 6 to 9, so x 40 is in it.
+        click_at(&mut t, &mut st, 40.0);
+        assert_eq!(
+            (t.nodes[1].field.anchor, t.nodes[1].caret),
+            (t.nodes[1].caret, t.nodes[1].caret)
+        );
+        click_at(&mut t, &mut st, 40.0);
+        let n = &t.nodes[1];
+        assert_eq!(
+            (n.field.anchor.min(n.caret), n.field.anchor.max(n.caret)),
+            (6, 9),
+            "the word"
+        );
+        click_at(&mut t, &mut st, 40.0);
+        let n = &t.nodes[1];
+        assert_eq!(
+            (n.field.anchor.min(n.caret), n.field.anchor.max(n.caret)),
+            (0, 15),
+            "the line"
+        );
+        // A fourth click starts over as a single click.
+        click_at(&mut t, &mut st, 40.0);
+        let n = &t.nodes[1];
+        assert_eq!(n.field.anchor, n.caret);
+        // Too long a pause, or too far away, is a new single click.
+        click_at(&mut t, &mut st, 40.0);
+        for _ in 0..=DOUBLE_CLICK_TICKS {
+            update(&mut t, &mut st, &pointer(40.0, 5.0, false));
+        }
+        click_at(&mut t, &mut st, 40.0);
+        assert_eq!(t.nodes[1].field.anchor, t.nodes[1].caret, "too slow");
+        click_at(&mut t, &mut st, 40.0);
+        click_at(&mut t, &mut st, 100.0);
+        assert_eq!(t.nodes[1].field.anchor, t.nodes[1].caret, "too far");
+        // Shift+Home style extension still works from a word selection.
+        click_at(&mut t, &mut st, 100.0);
+        assert!(
+            t.nodes[1].field.anchor != t.nodes[1].caret,
+            "a word at the far click"
+        );
     }
 }

@@ -14,7 +14,7 @@
 #   Toggle  ->  Switch        Slider -> Track        Meter -> Gauge
 #   TextInput -> Field
 
-from sage.ui import Box, Flow, Paint, Screen, States, TextStyle, Widget
+from sage.ui import Box, Decor, Flow, Paint, Screen, States, TextStyle, Widget
 
 ui = world.ui
 COLUMN, ROW = ui.COLUMN, ui.ROW
@@ -66,7 +66,7 @@ class Theme:
         fill = ui.fill()
         # Layout.
         self.Surface = make("Surface", ui.Panel, size(fill, fill), flow(gap=6, pad=(6, 6, 6, 6)))
-        self.Bar = make("Bar", ui.Panel, size(fill, 20), flow(ROW, CENTER, BETWEEN, 12, (8, 0, 8, 0)))
+        self.Bar = make("Bar", ui.Panel, size(fill, None), flow(ROW, CENTER, BETWEEN, 12, (8, 2, 8, 2)))
         self.Cols = make("Cols", ui.Panel, size(fill, fill), flow(ROW, STRETCH, START, gap=6))
         self.Column = make("Column", ui.Panel, size(fill, fill), flow(COLUMN, STRETCH, START, gap=6))
         self.Card = make("Card", ui.Panel, size(fill, None), flow(COLUMN, STRETCH, START, 4, (6, 5, 6, 6)))
@@ -87,7 +87,11 @@ class Theme:
             setattr(self, name, make(name, ui.Button, size(fill, None)))
         self.Item = make("Item", ui.Button, size(fill, None))
         self.Tab = make("Tab", ui.Choice, size(None, None))
+        ui.role(self.Tab, "tab")
+        ui.role(self.Title, "heading", level=1)
+        ui.role(self.Heading, "heading", level=2)
         self.Switch = make("Switch", ui.Toggle)
+        ui.role(self.Switch, "switch")
         self.Track = make("Track", ui.Slider)
         self.Gauge = make("Gauge", ui.Meter)
         self.Field = make("Field", ui.TextInput, size(None, 14))
@@ -132,6 +136,40 @@ class Theme:
         ui.MenuTitle.set(States(hover_fill=BG2, hover_text=accent, pressed_fill=EDGE))
         ui.MenuBar.set(Paint(BG1, EDGE, 1.0, accent))
         ui.Sep.set(Paint(EDGE, 0, 0.0, accent))
+        for bar in (ui.Scrubber, ui.Volume, ui.HueSlider, ui.AlphaSlider):
+            bar.set(Paint(BG2, EDGE, 1.0, accent))
+        for button in (ui.PlayButton, ui.MonthButton):
+            button.set(Paint(BG2, EDGE, 1.0, accent))
+            button.set(TextStyle(TEXT, 1.0, 0))
+            button.set(States(hover_fill=EDGE, hover_text=accent, pressed_fill=BG0))
+        ui.DayCell.set(Paint(BG2, 0, 0.0, accent))
+        ui.DayCell.set(TextStyle(TEXT, 1.0, 0))
+        ui.DayCell.set(States(hover_fill=EDGE, checked_fill=accent, checked_text=INK))
+        ui.Swatch.set(Paint(accent, EDGE, 1.0, accent))
+        ui.SortRow.set(Paint(BG2, EDGE, 1.0, accent))
+        ui.SortRow.set(TextStyle(TEXT, 1.0, 0))
+        ui.ResizeGrip.set(Paint(accent, 0, 0.0, accent))
+        ui.TabButton.set(Paint(BG2, EDGE, 1.0, accent))
+        ui.TabButton.set(TextStyle(MUTED, 1.0, 0))
+        ui.TabButton.set(States(checked_fill=accent, checked_text=INK, hover_text=TEXT))
+        ui.TabClose.set(Paint(BG2, EDGE, 1.0, accent))
+        ui.TabClose.set(TextStyle(MUTED, 1.0, 0))
+        ui.TabClose.set(States(hover_fill=DANGER, hover_text=TEXT))
+        ui.SplitHandle.set(Paint(EDGE, 0, 0.0, accent))
+        ui.SplitHandle.set(States(hover_fill=accent, pressed_fill=accent))
+        ui.DetailsHead.set(Paint(0, 0, 0.0, accent))
+        ui.DetailsHead.set(TextStyle(accent, 1.0, 0))
+        ui.DetailsHead.set(States(hover_fill=BG2, hover_text=TEXT))
+        ui.TreeLabel.set(Paint(0, 0, 0.0, accent))
+        ui.TreeLabel.set(TextStyle(TEXT, 1.0, 0))
+        ui.TreeLabel.set(States(hover_fill=BG2, checked_fill=accent, checked_text=INK))
+        ui.TreeArrow.set(Paint(0, 0, 0.0, accent))
+        ui.TreeArrow.set(TextStyle(accent, 1.0, 0))
+        ui.RadioButton.set(Paint(BG0, EDGE, 1.0, accent))
+        ui.RadioButton.set(Decor(radius=5.0))
+        ui.RadioButton.set(States(checked_fill=accent, hover_border=accent))
+        ui.LabelText.set(TextStyle(TEXT, 1.0, 0))
+        ui.FormError.set(TextStyle(DANGER, 1.0, 0))
         ui.TableHeader.set(Paint(BG2, EDGE, 1.0, accent))
         ui.TableHeader.set(TextStyle(accent, 1.0, 0))
         ui.TableHeader.set(States(hover_fill=EDGE, pressed_fill=BG0))

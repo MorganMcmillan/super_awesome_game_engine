@@ -8,3 +8,8 @@ publish.workspace = true
 
 [dependencies]
 image.workspace = true
+sage_core.workspace = true
+lewton.workspace = true
+puremp3.workspace = true
+fontdue.workspace = true
+rustybuzz.workspace = true

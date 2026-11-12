@@ -176,6 +176,15 @@ pub enum Widget {
     /// but draws no mark, so its `checked` style variant is the whole look.
     /// The base of radio buttons and tabs.
     Choice,
+    /// Something to drag (a split divider, a grabber): it reports the pointer
+    /// movement since the press as `Drag` events. Takes no keyboard focus.
+    Handle,
+    /// Text that acts when clicked (a `<label for>`): it reports `Clicked`
+    /// and takes no keyboard focus.
+    Label,
+    /// An embedded view of another simulation (`ui.viewport`). It takes the
+    /// pointer, reports where it is in the view, and can have keyboard focus.
+    Viewport,
 }
 
 impl Widget {
@@ -188,6 +197,9 @@ impl Widget {
             5 => Widget::Block,
             6 => Widget::Meter,
             7 => Widget::Choice,
+            8 => Widget::Handle,
+            9 => Widget::Label,
+            10 => Widget::Viewport,
             _ => Widget::None,
         }
     }
@@ -195,7 +207,12 @@ impl Widget {
     pub fn focusable(self) -> bool {
         matches!(
             self,
-            Widget::Button | Widget::Toggle | Widget::Choice | Widget::Slider | Widget::TextInput
+            Widget::Button
+                | Widget::Toggle
+                | Widget::Choice
+                | Widget::Slider
+                | Widget::TextInput
+                | Widget::Viewport
         )
     }
 }
@@ -375,6 +392,31 @@ pub struct GradientNode {
     pub vertical: bool,
 }
 
+/// A vector shape on a canvas, in points relative to the node's own top-left
+/// corner, cut off at the node's rectangle.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct ShapeNode {
+    /// 1 line from `pts[0]` to `pts[1]` of `width`; 2 filled triangle through
+    /// the three points; 3 filled ellipse centered on `pts[0]` with radii
+    /// `pts[1]`.
+    pub kind: u32,
+    pub pts: [[f32; 2]; 3],
+    pub width: f32,
+    pub color: Color,
+}
+
+/// An embedded view of a simulation: what it last drew, and (output) where
+/// the pointer is in it.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct ViewportNode {
+    pub frame: Option<sage_core::host::Frame>,
+    /// Output: the pointer relative to the node's top-left, when it is over
+    /// the view or dragging from it.
+    pub pointer: Option<[f32; 2]>,
+    /// Output: mouse buttons held there (1 primary, 2 secondary, 4 middle).
+    pub buttons: u32,
+}
+
 #[derive(Clone, Debug)]
 pub struct Node {
     /// The StableId of the entity this node stands for.
@@ -449,6 +491,43 @@ pub struct Node {
     pub caret: usize,
     /// Text input: selection anchor, scroll, rules and undo history.
     pub field: FieldNode,
+    /// Where the pointer was when a drag on this handle began.
+    pub drag: Option<[f32; 2]>,
+    /// What the node says about itself to a screen reader (see `access`).
+    pub access: Option<crate::access::AccessInfo>,
+    /// An SVG document drawn to fit the node (`None` when there is none).
+    pub svg: Option<crate::svg::Svg>,
+    /// The node's SVG could not be parsed: it draws a magenta box, like a
+    /// missing image.
+    pub svg_error: bool,
+    /// How much of its own height an auto-height node shows, 0 to 1: the
+    /// rest is cut off, so animating this from 0 to 1 is a height
+    /// transition (`<details>` opening). 1 is normal.
+    pub reveal: f32,
+    /// Where this node goes among its siblings: lower first, ties in tree
+    /// order (CSS `order`). Moving rows is changing their keys.
+    pub order: i32,
+    /// Inside a scroll container, a flow child with this set stays at this
+    /// distance from the top (or left) of the view once scrolled past, until
+    /// the end of the container's content (CSS `position: sticky`).
+    pub sticky: Option<f32>,
+    /// A scroll container that also scrolls across its flow direction.
+    pub scroll_cross: bool,
+    pub scroll_offset_cross: f32,
+    /// The size of the content across the flow, when `scroll_cross`.
+    pub content_cross: f32,
+    /// A canvas shape drawn in this node's rectangle.
+    pub shape: Option<ShapeNode>,
+    /// An embedded simulation view.
+    pub viewport: Option<ViewportNode>,
+    /// Something that can be picked up and dropped: its payload and kind.
+    pub draggable: Option<(u64, u32)>,
+    /// Kinds of draggable this node accepts a drop of (a bit set; 0 for none).
+    pub drop_kinds: u32,
+    /// Output: a drag of an accepted kind is over this node.
+    pub drop_over: bool,
+    /// A key chord that acts as a click on this node: key and modifiers.
+    pub shortcut: Option<[u32; 2]>,
     /// Space outside the box: left, top, right, bottom.
     pub margin: [f32; 4],
     /// Smallest and largest size per axis (0 for no limit).
@@ -531,6 +610,22 @@ impl Default for Node {
             scroll_offset: 0.0,
             caret: 0,
             field: FieldNode::default(),
+            drag: None,
+            access: None,
+            svg: None,
+            svg_error: false,
+            reveal: 1.0,
+            order: 0,
+            sticky: None,
+            scroll_cross: false,
+            scroll_offset_cross: 0.0,
+            content_cross: 0.0,
+            shape: None,
+            viewport: None,
+            draggable: None,
+            drop_kinds: 0,
+            drop_over: false,
+            shortcut: None,
             margin: [0.0; 4],
             size_min: [0.0; 2],
             size_max: [0.0; 2],
@@ -617,6 +712,13 @@ impl Tree {
                 out[p].push(i);
             }
         }
+        // Siblings go by their `order` key; the sort is stable, so equal keys
+        // keep tree order.
+        for list in &mut out {
+            if list.iter().any(|&k| self.nodes[k].order != 0) {
+                list.sort_by_key(|&k| self.nodes[k].order);
+            }
+        }
         out
     }
 
@@ -680,6 +782,9 @@ pub struct FieldNode {
     pub numeric: bool,
     pub max_len: usize,
     pub placeholder: String,
+    /// Text an input method is composing (not yet part of the text); drawn at
+    /// the caret, underlined, while this field has focus.
+    pub preedit: String,
     pub hist: crate::text::History,
 }
 
@@ -694,6 +799,7 @@ impl Default for FieldNode {
             numeric: false,
             max_len: 256,
             placeholder: String::new(),
+            preedit: String::new(),
             hist: crate::text::History::default(),
         }
     }
@@ -729,6 +835,69 @@ pub fn chars_per_line(width: f32, scale: f32) -> usize {
 /// Breaks `text` into lines of at most `width` units at `scale`: at spaces
 /// when it can, in the middle of a word when a word is longer than a line.
 /// Existing `\n` stay. Runs of spaces collapse only where a line breaks.
+/// Does this node's static text use the proportional face? Inputs and rich
+/// text count columns, so they stay on the grid.
+fn proportional(n: &Node) -> Option<std::rc::Rc<dyn sage_core::host::TextMetrics>> {
+    if n.widget == Widget::TextInput || n.rich.is_some() {
+        return None;
+    }
+    sage_core::host::text_metrics()
+}
+
+/// The size of a node's text: the grid's, or the proportional face's.
+pub fn node_text_size(n: &Node, text: &str) -> [f32; 2] {
+    let Some(m) = proportional(n) else {
+        return text_size(text, n.text_scale);
+    };
+    if text.is_empty() {
+        return [0.0, 0.0];
+    }
+    let lines: Vec<&str> = text.split('\n').collect();
+    let w = lines.iter().map(|l| m.line_width(l)).fold(0.0, f32::max);
+    let h = (lines.len() - 1) as f32 * m.line_height() + UI_GLYPH[1];
+    [w * n.text_scale, h * n.text_scale]
+}
+
+/// A node's text broken into lines for `width`: by columns on the grid, by
+/// measured width with a proportional face.
+pub fn node_wrap_text(n: &Node, width: f32) -> String {
+    let Some(m) = proportional(n) else {
+        return wrap_text(&n.text, n.text_scale, width);
+    };
+    let room = (width / n.text_scale).max(1.0);
+    let mut out: Vec<String> = vec![];
+    for para in n.text.split('\n') {
+        let mut line = String::new();
+        for word in para.split(' ') {
+            let try_line = if line.is_empty() {
+                word.to_string()
+            } else {
+                format!("{line} {word}")
+            };
+            if line.is_empty() || m.line_width(&try_line) <= room {
+                line = try_line;
+                continue;
+            }
+            out.push(std::mem::take(&mut line));
+            // A word wider than a line is broken by characters.
+            let mut rest = word.to_string();
+            while m.line_width(&rest) > room && rest.chars().count() > 1 {
+                let mut take = 1;
+                while take < rest.chars().count()
+                    && m.line_width(&rest.chars().take(take + 1).collect::<String>()) <= room
+                {
+                    take += 1;
+                }
+                out.push(rest.chars().take(take).collect());
+                rest = rest.chars().skip(take).collect();
+            }
+            line = rest;
+        }
+        out.push(line);
+    }
+    out.join("\n")
+}
+
 pub fn wrap_text(text: &str, scale: f32, width: f32) -> String {
     let max = chars_per_line(width, scale);
     let mut out: Vec<String> = vec![];
@@ -1037,13 +1206,14 @@ impl Pass<'_> {
             content[c] = cross;
         }
         let shown = match (n.wrap, self.hints[i]) {
-            (true, Some(width)) => wrap_text(&n.text, n.text_scale, width),
+            (true, Some(width)) => node_wrap_text(n, width),
             _ => n.text.clone(),
         };
-        let text = text_size(&shown, n.text_scale);
+        let text = node_text_size(n, &shown);
         let img = n.image.map_or([0.0; 2], |i| i.frame_size());
         let w = content[0].max(text[0]).max(img[0]) + n.padding[0] + n.padding[2];
-        let h = content[1].max(text[1]).max(img[1]) + n.padding[1] + n.padding[3];
+        let h = (content[1].max(text[1]).max(img[1]) + n.padding[1] + n.padding[3])
+            * n.reveal.clamp(0.0, 1.0);
         self.intrinsic[i] = [w, h];
         [w, h]
     }
@@ -1079,7 +1249,7 @@ impl Pass<'_> {
         self.tree.nodes[i].rect = rect;
         self.tree.nodes[i].clip = clip;
         let n = self.tree.nodes[i].clone();
-        let child_clip = if n.scroll {
+        let child_clip = if n.scroll || n.reveal < 1.0 {
             Some(clip.map_or(rect, |c| c.intersect(&rect)))
         } else {
             clip
@@ -1134,6 +1304,128 @@ impl Pass<'_> {
                 child_clip,
                 depth + 1,
             );
+        }
+        if n.scroll {
+            self.stick(i, origin[m], scroll, extent[m], m);
+            if n.scroll_cross {
+                self.scroll_across(
+                    i,
+                    origin[1 - m],
+                    if m == 0 { content.h } else { content.w },
+                    m,
+                    child_clip,
+                );
+            }
+        }
+    }
+
+    /// Moves `delta` along an axis for a node and everything below it. Clips
+    /// that are not `outer` (the clip of the shifted container) move too:
+    /// they belong to a scroll container inside the shifted part.
+    fn shift(&mut self, i: usize, axis: usize, delta: f32, outer: Option<Rect>) {
+        if delta == 0.0 {
+            return;
+        }
+        let mut stack = vec![(i, 0usize)];
+        while let Some((k, depth)) = stack.pop() {
+            if depth > MAX_DEPTH {
+                continue;
+            }
+            let node = &mut self.tree.nodes[k];
+            if axis == 0 {
+                node.rect.x += delta;
+            } else {
+                node.rect.y += delta;
+            }
+            if k != i
+                && let Some(c) = &mut node.clip
+                && Some(*c) != outer
+            {
+                if axis == 0 {
+                    c.x += delta;
+                } else {
+                    c.y += delta;
+                }
+            }
+            for &c in &self.kids[k] {
+                stack.push((c, depth + 1));
+            }
+        }
+    }
+
+    /// Sticky children of scroll container `i`: each that has scrolled past
+    /// the start of the view is held at its inset, pushed up by the next
+    /// sticky one and never past the end of the content.
+    fn stick(&mut self, i: usize, start: f32, scroll: f32, view: f32, m: usize) {
+        let sticky: Vec<usize> = self.kids[i]
+            .iter()
+            .copied()
+            .filter(|&k| {
+                self.tree.nodes[k].sticky.is_some() && self.tree.nodes[k].absolute.is_none()
+            })
+            .collect();
+        let pos = |t: &Tree, k: usize| {
+            if m == 0 {
+                t.nodes[k].rect.x
+            } else {
+                t.nodes[k].rect.y
+            }
+        };
+        let size = |t: &Tree, k: usize| {
+            if m == 0 {
+                t.nodes[k].rect.w
+            } else {
+                t.nodes[k].rect.h
+            }
+        };
+        let content_end = start - scroll + self.tree.nodes[i].content.max(view);
+        for (idx, &k) in sticky.iter().enumerate() {
+            let inset = self.tree.nodes[k].sticky.unwrap_or(0.0);
+            let want = start + inset;
+            let at = pos(self.tree, k);
+            if at >= want {
+                continue;
+            }
+            let mut limit = content_end - size(self.tree, k);
+            if let Some(&next) = sticky.get(idx + 1) {
+                limit = limit.min(pos(self.tree, next) - size(self.tree, k));
+            }
+            let delta = (want - at).min(limit - at).max(0.0);
+            let outer = self.tree.nodes[i].clip;
+            self.shift(k, m, delta, outer);
+        }
+    }
+
+    /// Scrolling across the flow: measures how far the descendants reach,
+    /// clamps the offset, and shifts them.
+    fn scroll_across(
+        &mut self,
+        i: usize,
+        start: f32,
+        view: f32,
+        m: usize,
+        child_clip: Option<Rect>,
+    ) {
+        let c = 1 - m;
+        let mut hi = start;
+        let mut stack: Vec<(usize, usize)> = self.kids[i].iter().map(|&k| (k, 0)).collect();
+        while let Some((k, depth)) = stack.pop() {
+            if depth > MAX_DEPTH {
+                continue;
+            }
+            let r = self.tree.nodes[k].rect;
+            hi = hi.max(if c == 0 { r.x + r.w } else { r.y + r.h });
+            stack.extend(self.kids[k].iter().map(|&g| (g, depth + 1)));
+        }
+        let need = (hi - start).max(0.0);
+        let off = self.tree.nodes[i]
+            .scroll_offset_cross
+            .clamp(0.0, (need - view).max(0.0));
+        let node = &mut self.tree.nodes[i];
+        node.content_cross = need;
+        node.scroll_offset_cross = off;
+        for k in self.kids[i].clone() {
+            self.shift(k, c, -off, child_clip);
         }
     }
 
@@ -1331,7 +1623,18 @@ impl Pass<'_> {
                 Align::Center => free / 2.0,
                 Align::End => free,
             };
-            let mut at = [origin[0] + cx[p.col] + ml, origin[1] + ry[p.row] + mt + y];
+            // A child narrower than its cell sits at the cell's start, middle
+            // or end, by the same `align_self` (CSS `place-self`).
+            let free_w = (cw - ml - kn.margin[2] - w2).max(0.0);
+            let x = match (kn.align_self, matches!(spec(kn, 0), Size::Fixed(_))) {
+                (Some(Align::Center), true) => free_w / 2.0,
+                (Some(Align::End), true) => free_w,
+                _ => 0.0,
+            };
+            let mut at = [
+                origin[0] + cx[p.col] + ml + x,
+                origin[1] + ry[p.row] + mt + y,
+            ];
             at[m] -= scroll;
             self.arrange(
                 p.k,
@@ -1487,7 +1790,7 @@ fn layout_pass(tree: &mut Tree, viewport: [f32; 2]) {
     for n in &mut tree.nodes {
         n.lines = if n.wrap {
             let width = n.rect.w - n.padding[0] - n.padding[2];
-            wrap_text(&n.text, n.text_scale, width)
+            node_wrap_text(n, width)
         } else {
             n.text.clone()
         };
@@ -2324,5 +2627,155 @@ mod tests {
         assert_eq!(r[2][..2], [64.0, 13.0]);
         // The auto child fills the first free slot after the spanning one.
         assert_eq!(r[3][..2], [64.0, 0.0]);
+    }
+
+    #[test]
+    fn order_keys_put_siblings_in_a_new_order_and_equal_keys_keep_tree_order() {
+        let mut nodes = vec![Node {
+            width: Size::Fixed(60.0),
+            height: Size::Fixed(60.0),
+            ..node(None)
+        }];
+        for k in 0..3 {
+            nodes.push(Node {
+                id: 10 + k,
+                ..fixed(Some(0), 60.0, 10.0)
+            });
+        }
+        let mut t = Tree { nodes };
+        layout(&mut t, [100.0, 100.0]);
+        let ys = |t: &Tree| (1..4).map(|k| t.nodes[k].rect.y).collect::<Vec<_>>();
+        assert_eq!(ys(&t), [0.0, 10.0, 20.0]);
+        t.nodes[1].order = 5; // the first goes last
+        layout(&mut t, [100.0, 100.0]);
+        assert_eq!(ys(&t), [20.0, 0.0, 10.0]);
+        t.nodes[3].order = 5; // ties keep tree order: second, then first? no: 1 then 3
+        layout(&mut t, [100.0, 100.0]);
+        assert_eq!(ys(&t), [10.0, 0.0, 20.0]);
+    }
+
+    /// A 50x30 scroll column of five 50x10 rows, the first two sticky.
+    fn sticky_list(offset: f32) -> Tree {
+        let mut nodes = vec![Node {
+            width: Size::Fixed(50.0),
+            height: Size::Fixed(30.0),
+            scroll: true,
+            scroll_offset: offset,
+            ..node(None)
+        }];
+        for k in 0..5 {
+            let mut n = fixed(Some(0), 50.0, 10.0);
+            n.id = 10 + k;
+            nodes.push(n);
+        }
+        nodes[1].sticky = Some(0.0);
+        let mut t = Tree { nodes };
+        layout(&mut t, [100.0, 100.0]);
+        t
+    }
+
+    #[test]
+    fn a_sticky_row_stays_at_the_top_of_the_view_until_the_content_ends() {
+        // Not scrolled: everything is where it flows.
+        let t = sticky_list(0.0);
+        assert_eq!(t.nodes[1].rect.y, 0.0);
+        // Scrolled 15: the header would be at -15; it is held at the top, and
+        // the row under it still scrolls.
+        let t = sticky_list(15.0);
+        assert_eq!(t.nodes[1].rect.y, 0.0, "held at the view's top");
+        assert_eq!(t.nodes[2].rect.y, -5.0, "the others move on");
+        // Content is 50 in a 30 view: the most it scrolls is 20; the header
+        // never goes below the end of the content.
+        let t = sticky_list(20.0);
+        assert_eq!(t.nodes[1].rect.y, 0.0);
+        assert!(t.nodes[1].rect.y + t.nodes[1].rect.h <= 30.0);
+        // A second sticky row pushes the first one up as it arrives.
+        let mut t = sticky_list(0.0);
+        t.nodes[3].sticky = Some(0.0);
+        t.nodes[0].scroll_offset = 18.0;
+        layout(&mut t, [100.0, 100.0]);
+        // Row 3 flows to y = 20 - 18 = 2, not yet at the top. Row 1 is held
+        // at the top but stays above row 3: it is pushed up to 2 - 10.
+        assert_eq!(t.nodes[3].rect.y, 2.0);
+        assert_eq!(t.nodes[1].rect.y, -8.0, "pushed up by the next sticky row");
+        // Scrolled further, row 3 reaches the top and takes over.
+        t.nodes[0].scroll_offset = 20.0;
+        layout(&mut t, [100.0, 100.0]);
+        assert_eq!(t.nodes[3].rect.y, 0.0);
+        assert!(t.nodes[1].rect.y <= -10.0);
+    }
+
+    #[test]
+    fn a_container_can_scroll_across_its_flow_too() {
+        let mut nodes = vec![Node {
+            width: Size::Fixed(40.0),
+            height: Size::Fixed(30.0),
+            scroll: true,
+            scroll_cross: true,
+            scroll_offset_cross: 25.0,
+            ..node(None)
+        }];
+        // Three 100-wide, 10-high rows: 100 wide against a 40 view.
+        for _ in 0..3 {
+            nodes.push(fixed(Some(0), 100.0, 10.0));
+        }
+        let mut t = Tree { nodes };
+        layout(&mut t, [200.0, 200.0]);
+        assert_eq!(t.nodes[0].content_cross, 100.0);
+        assert_eq!(t.nodes[0].scroll_offset_cross, 25.0);
+        assert_eq!(t.nodes[1].rect.x, -25.0);
+        assert_eq!(t.nodes[1].rect.y, 0.0, "the other axis is untouched");
+        assert_eq!(t.nodes[1].clip.map(|c| c.w), Some(40.0));
+        // Clamped to what is left: 100 - 40.
+        t.nodes[0].scroll_offset_cross = 999.0;
+        layout(&mut t, [200.0, 200.0]);
+        assert_eq!(t.nodes[0].scroll_offset_cross, 60.0);
+        t.nodes[0].scroll_offset_cross = -4.0;
+        layout(&mut t, [200.0, 200.0]);
+        assert_eq!(t.nodes[1].rect.x, 0.0);
+        // A row-flow container scrolls across vertically.
+        let mut nodes = vec![Node {
+            width: Size::Fixed(40.0),
+            height: Size::Fixed(30.0),
+            direction: Direction::Row,
+            scroll: true,
+            scroll_cross: true,
+            scroll_offset_cross: 10.0,
+            ..node(None)
+        }];
+        nodes.push(fixed(Some(0), 20.0, 80.0));
+        let mut t = Tree { nodes };
+        layout(&mut t, [200.0, 200.0]);
+        assert_eq!(t.nodes[0].content_cross, 80.0);
+        assert_eq!(t.nodes[1].rect.y, -10.0);
+    }
+
+    #[test]
+    fn reveal_shows_a_fraction_of_an_auto_height_and_cuts_the_rest() {
+        let mut nodes = vec![node(None)];
+        nodes.push(Node {
+            direction: Direction::Column,
+            ..node(Some(0))
+        });
+        for _ in 0..4 {
+            nodes.push(fixed(Some(1), 40.0, 10.0));
+        }
+        nodes.push(fixed(Some(0), 40.0, 5.0)); // a sibling below the body
+        let mut t = Tree { nodes };
+        layout(&mut t, [100.0, 100.0]);
+        assert_eq!(t.nodes[1].rect.h, 40.0);
+        assert_eq!(t.nodes[6].rect.y, 40.0);
+        t.nodes[1].reveal = 0.25;
+        layout(&mut t, [100.0, 100.0]);
+        assert_eq!(t.nodes[1].rect.h, 10.0, "a quarter of 40");
+        assert_eq!(t.nodes[6].rect.y, 10.0, "the sibling moved up with it");
+        let clip = t.nodes[4].clip.expect("the rest is clipped");
+        assert_eq!((clip.y, clip.h), (0.0, 10.0));
+        t.nodes[1].reveal = 0.0;
+        layout(&mut t, [100.0, 100.0]);
+        assert_eq!(t.nodes[6].rect.y, 0.0);
+        t.nodes[1].reveal = 7.0; // out of range counts as fully shown
+        layout(&mut t, [100.0, 100.0]);
+        assert_eq!(t.nodes[1].rect.h, 40.0);
     }
 }

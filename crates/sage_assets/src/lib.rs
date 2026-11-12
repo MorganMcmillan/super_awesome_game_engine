@@ -6,8 +6,10 @@
 //! depend on it. A simulation that wants to name an asset stores its
 //! [`AssetId`], which depends only on the asset's path.
 
+pub mod compressed;
 mod font;
 mod image_asset;
+pub mod proportional;
 mod store;
 pub mod wav;
 

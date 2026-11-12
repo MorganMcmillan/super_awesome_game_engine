@@ -1,8 +1,8 @@
 //! Sounds: decoded to mono `f32` samples in `[-1, 1]`.
 //!
 //! The decoder reads RIFF/WAVE with PCM (8, 16, 24 and 32 bit) or IEEE float
-//! (32 bit) data and mixes any channel count down to mono. Other formats
-//! (Ogg, MP3) are out of M1's scope.
+//! (32 bit) data and mixes any channel count down to mono. Ogg Vorbis and MP3
+//! are in `compressed`.
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct Sound {

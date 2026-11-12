@@ -1,5 +1,8 @@
 # Plan: recreate the HTML features games need, in the engine's ECS UI
 
+## Status (2026-11-11)
+Phases P1 to P9 are implemented within the approved scope. `docs/milestone-3.md` lists every element with the test that proves it and every gap that is left. The dependencies of decisions 1 and 4 were approved (`accesskit` with its Windows adapter, `fontdue`, `rustybuzz`, `unicode-segmentation`, OGG and MP3 decoders, `roxmltree`) and are used. What stays open: running the Windows adapter on Windows (and a Linux or macOS adapter, not approved), multi-window tear-off (decision 6, deferred by decision) and real video decoding (decision 5, not to be built).
+
 ## Context
 Morgan decided the editor (M3) is built on the engine's own UI entities, and that the UI should recreate the important parts of HTML, with Godot's UI as a second reference. A survey of the code found 30-odd HTML elements with no equivalent (image, canvas/svg, embedded viewport, video/audio, select, menus, radio, tooltips, textarea, number/password/color/file/date inputs, form, table/grid, lists, tree, details, tabs, split panes, slots, semantic roles, links, rich text, headings/fonts), plus CSS gaps. This plan says how each one is built, in what order, and what must be decided first.
 

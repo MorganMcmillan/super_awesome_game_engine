@@ -88,7 +88,8 @@ def labeled_row(parent, text, value):
 app = ui.add(T.Surface)
 bar = ui.add(T.Bar, app)
 ui.add(T.Title, bar, text="UI PLAYGROUND")
-nav = ui.add(T.Row, bar, gap=3)
+nav = ui.add(T.Row, bar, gap=3, wrap_flow=2, width=ui.fill(), justify=ui.END)
+ui.role(nav, "tablist", name="PAGES")
 cols = ui.add(T.Cols, app)
 left, middle, right = (ui.add(T.Column, cols) for _ in range(3))
 
@@ -98,6 +99,7 @@ left, middle, right = (ui.add(T.Column, cols) for _ in range(3))
 page_roots = [cols]
 tab_buttons = [ui.add(T.Tab, nav, text="BASICS")]
 tab_buttons[0].set(Toggle(1))
+ui.role(cols, "tabpanel", labelled_by=tab_buttons[0])
 tab_sids = {tab_buttons[0].sid: 0}
 page_names = ["BASICS"]
 
@@ -111,6 +113,7 @@ def add_page(name):
     page_names.append(name)
     page_roots.append(root)
     tab_buttons.append(tab)
+    ui.role(root, "tabpanel", labelled_by=tab)
     return root
 
 
@@ -155,7 +158,7 @@ themes = card(middle, "STYLE PREFABS")
 ui.add(
     T.Para,
     themes,
-    text="EVERY WIDGET HERE IS AN INSTANCE OF A PREFAB. A THEME EDITS THE PREFABS, AND EVERY INSTANCE FOLLOWS.",
+    text="A THEME EDITS THE PREFABS; EVERY INSTANCE FOLLOWS.",
 )
 row = ui.add(T.Row, themes)
 swatches = {}

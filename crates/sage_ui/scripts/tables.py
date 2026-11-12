@@ -4,7 +4,7 @@
 
 import sage
 from sage import component
-from sage.ui import Clicked, Label, Toggle, Toggled
+from sage.ui import Clicked, Dragged, Drag, Grid as GridC, Label, Rect, Toggle, Toggled, Widget, Box
 
 ui = world.ui
 
@@ -38,30 +38,55 @@ ui.TableHeader = world.prefab("UiTableHeader", base=ui.Button)
 ui.TableCell = world.prefab("UiTableCell", base=ui.Choice)
 
 
-def table(parent, header, rows, widths=None, **style):
+@component
+class ColGrip:
+    """The grip at a column header's right edge: its table, its column, and
+    that column's width when the drag began."""
+
+    grid: sage.u64 = 0
+    col: sage.u32 = 0
+    start: sage.f32 = 0.0
+
+
+ui.ColGrip = world.prefab("UiColGrip", base=ui.Panel)
+ui.ColGrip.set(Widget(8, 1, 0, 0)).set(Drag())
+MIN_COLUMN = 16.0
+
+
+def table(parent, header, rows, widths=None, resizable=False, **style):
     """A table: a grid with a header row of buttons (click to sort) over rows
     of cells (click to select a row). `header` is a list of titles, `rows` a
     list of rows of values, `widths` a track list (default: every column
     `auto`, the last `1fr`). Returns the grid; read `grid.get(Table)` for the
-    sort and the selected row, and `ui.table_cells(grid)` for the cells."""
+    sort and the selected row, and `ui.table_cells(grid)` for the cells.
+    `resizable` puts a grip at the right edge of every header but the last:
+    drag it to give that column a fixed width."""
     n = len(header)
     tracks = widths if widths is not None else ["auto"] * (n - 1) + ["1fr"]
     g = ui.grid(parent, tracks, "", (4, 2), **style)
     g.set(Table(n, len(rows), -1, 0, -1))
+    ui.role(g, "table")
     for col, title in enumerate(header):
-        h = ui.add(ui.TableHeader, g, text=str(title))
+        h = ui.add(ui.TableHeader, g, text=str(title), width=ui.fill())
         h.set(HeadOf(g.sid, col))
+        ui.role(h, "columnheader")
+    if resizable:
+        for col in range(n - 1):
+            grip = ui.add(ui.ColGrip, g, cell=(col + 1, 1, 1, 1), align_self="end", width=3, height=ui.fill())
+            grip.set(ColGrip(g.sid, col, 0.0))
+            ui.role(grip, "separator", name="RESIZE COLUMN")
     for r, row in enumerate(rows):
         for col, value in enumerate(row):
-            c = ui.add(ui.TableCell, g, text=str(value))
+            c = ui.add(ui.TableCell, g, text=str(value), width=ui.fill())
             c.set(CellOf(g.sid, r, col))
+            ui.role(c, "cell")
     return g
 
 
 def table_cells(grid):
     """The cells as a list of rows (the header is not included)."""
     t = grid.get(Table)
-    kids = list(grid.children)[t.cols:]
+    kids = [c for c in list(grid.children)[t.cols:] if c.has(CellOf)]
     return [kids[r * t.cols:(r + 1) * t.cols] for r in range(t.rows)]
 
 
@@ -141,3 +166,36 @@ def _ui_table_cell(c: Toggled):
         return
     k = e.get(CellOf)
     _select(world.lookup(k.grid), k.row if c.on else -1)
+
+
+def table_columns(grid):
+    """The grid's column tracks as a list of strings (`["40", "auto", "1fr"]`)."""
+    return world.string(grid.get(GridC).cols).split()
+
+
+def table_set_column(grid, col, width):
+    """Gives column `col` a fixed width (at least a few units)."""
+    tracks = table_columns(grid)
+    tracks[col] = "%g" % max(MIN_COLUMN, float(width))
+    g = grid.get(GridC).copy()
+    g.cols = world.intern(" ".join(tracks))
+    grid.set(g)
+
+
+ui.table_columns, ui.table_set_column = table_columns, table_set_column
+ui.ColGripState = ColGrip
+
+
+@world.observer(Dragged)
+def _ui_col_grip(d: Dragged):
+    e = world.lookup(d.target)
+    if e is None or not e.has(ColGrip):
+        return
+    info = e.get(ColGrip).copy()
+    grid = world.lookup(info.grid)
+    header = grid.children[info.col]
+    if d.phase == 0:
+        info.start = header.get(Rect).w
+        e.set(info)
+        return
+    table_set_column(grid, info.col, info.start + d.dx)

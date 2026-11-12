@@ -11,9 +11,11 @@
 //! software mixer (`mixer`) on one SDL audio stream (`audio`). Input is
 //! mapped to game bits by `input::InputMap`.
 
+pub mod a11y;
 pub mod audio;
 pub mod gpu;
 pub mod input;
+pub mod media;
 pub mod mixer;
 pub mod sprite;
 pub mod ui_window;

@@ -1,0 +1,1 @@
+These are miscelanious notes Morgan wrote while testing out the engine. They are mostly suggestions on how to improve the engine, with each suggestion being a markdown checkbox that is only checked if the suggestion has been implemented.

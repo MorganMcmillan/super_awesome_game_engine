@@ -112,6 +112,15 @@ impl GpuRenderer {
         Ok(r)
     }
 
+    /// Replaces the text face (slot 1 of the textures) with `font`'s atlas.
+    pub fn set_font(&mut self, font: BitmapFont) -> Result<(), String> {
+        self.add_texture(&font.atlas)?;
+        let uploaded = self.textures.pop().ok_or("the font texture was not made")?;
+        self.textures[FONT.0 as usize] = uploaded;
+        self.font = font;
+        Ok(())
+    }
+
     pub fn backend_name(&self) -> String {
         // SDL reports the driver per device through a property; the format set
         // tells us enough for logs.

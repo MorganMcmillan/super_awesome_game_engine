@@ -26,10 +26,12 @@ use sage_core::host::UiFrame;
 use sage_ecs_py::{Ecs, StableIdC};
 use sage_scene::StringTable;
 
-use crate::interact::{EventKind, UiInput, UiState, update};
+use crate::access::AccessInfo;
+use crate::interact::{Dnd, EventKind, LastPress, UiInput, UiState, update};
 use crate::layout::{
     Align, CellNode, Direction, Edge, Fit, GradientNode, GridNode, ImageNode, Justify, LayerNode,
-    Node, Placement, ShadowNode, Size, SliceNode, Tree, Widget, layout, parse_tracks,
+    Node, Placement, ShadowNode, ShapeNode, Size, SliceNode, Tree, ViewportNode, Widget, layout,
+    parse_tracks,
 };
 use crate::style::{Resolved, States, Variant, ease, resolve};
 
@@ -193,6 +195,163 @@ ui_component!(
     /// apart (like `flex-wrap`).
     UiWrapFlow { on: u32, gap: f32 }
 );
+ui_component!(
+    /// A drag handle's state: where the pointer was at the press (`on` 1
+    /// while it is held).
+    UiDrag { x: f32, y: f32, on: u32 }
+);
+ui_component!(UiDragged {
+    target: u64,
+    phase: u32,
+    dx: f32,
+    dy: f32
+});
+ui_component!(
+    /// Marks a node that can be picked up and dropped: what it carries (any
+    /// number the game gives meaning to) and its kind, 0 to 31.
+    UiDraggable { payload: u64, kind: u32 }
+);
+ui_component!(
+    /// Marks a node that accepts drops: a bit set of the kinds it takes (bit
+    /// `k` for kind `k`). `over` is 1 while a drag of an accepted kind is
+    /// above it.
+    UiDropZone { kinds: u32, over: u32 }
+);
+ui_component!(
+    /// A key chord that acts as a click on this node. `key` is an upper-case
+    /// ASCII letter or digit, or `0x100 + n - 1` for F`n`; `mods` is a bit set
+    /// of 1 Ctrl, 2 Shift, 4 Alt.
+    UiShortcut { key: u32, mods: u32 }
+);
+ui_component!(
+    /// A vector shape drawn in the node's rectangle (a canvas item), in points
+    /// relative to the node's top-left. `kind` 1 is a line from (x0, y0) to
+    /// (x1, y1) of `width`; 2 a filled triangle through the three points; 3 a
+    /// filled ellipse centered on (x0, y0) with radii (x1, y1).
+    UiShape {
+        kind: u32,
+        x0: f32,
+        y0: f32,
+        x1: f32,
+        y1: f32,
+        x2: f32,
+        y2: f32,
+        width: f32,
+        color: u32
+    }
+);
+ui_component!(
+    /// An embedded view of a simulation the host draws: which one (`source`,
+    /// the id the host registers frames under) and, written by the UI each
+    /// tick, the pointer in that simulation's world units (`x`, `y`, y up),
+    /// whether it is over the view or dragging from it, and the mouse
+    /// buttons held (1 primary, 2 secondary, 4 middle).
+    UiViewport {
+        source: u32,
+        x: f32,
+        y: f32,
+        over: u32,
+        down: u32
+    }
+);
+ui_component!(
+    /// What a node says about itself to a screen reader: a role (a number
+    /// from `access::Role`; 0 keeps the one its widget implies), a heading
+    /// level, `hidden` to leave it out, an explicit name and description
+    /// (string ids), the node that names it (`labelled_by`) and, on a label,
+    /// the control it names (`label_for`).
+    UiAccess {
+        role: u32,
+        level: u32,
+        hidden: u32,
+        name: u64,
+        description: u64,
+        labelled_by: u64,
+        label_for: u64
+    }
+);
+ui_component!(
+    /// A media player's state (see `ui.media_controls`): what it plays
+    /// (`source`, an asset id the host knows; 0 for none), whether it is
+    /// playing, its position and length in ticks, its volume (0 to 1) and
+    /// whether it loops. The UI advances `position`; the host reads this to
+    /// drive audio (`sage_platform::media`) and writes nothing back.
+    UiMedia {
+        source: u64,
+        playing: u32,
+        position: f32,
+        length: f32,
+        volume: f32,
+        looping: u32
+    }
+);
+ui_component!(
+    /// An SVG document drawn to fit the node (`markup` is a string id). See
+    /// `svg` for what it draws.
+    UiSvg { markup: u64 }
+);
+ui_component!(
+    /// Where a node goes among its siblings (CSS `order`): lower first, ties in
+    /// creation order. Reordering rows is swapping keys.
+    UiOrder { key: i32 }
+);
+ui_component!(
+    /// A flow child of a scroll container that holds at `inset` from the top
+    /// (left) of the view once scrolled past (`position: sticky`).
+    UiSticky { inset: f32, on: u32 }
+);
+ui_component!(
+    /// Marks a scroll container that also scrolls across its flow, and holds
+    /// that offset (Shift and the wheel move it).
+    UiScrollCross { on: u32, offset: f32 }
+);
+ui_component!(
+    /// Native file dialog request and answer (a singleton). The UI sets
+    /// `request` (1 open, 2 save) and `target` (the field that asked); the
+    /// host shows its dialog, then sets `done` (1 a file was chosen, 2 it was
+    /// cancelled) and `result` (a string id of the path).
+    UiFileDialog {
+        request: u32,
+        target: u64,
+        result: u64,
+        done: u32
+    }
+);
+ui_component!(
+    /// The host's answer to a native file dialog, emitted on the field that
+    /// asked: `done` 1 with the path (a string id), or 2 for a cancel.
+    UiFileAnswered { target: u64, path: u64, done: u32 }
+);
+ui_component!(
+    /// Input singleton: text an input method is composing, not yet committed
+    /// (a string id; 0 for none). The focused text input draws it at its caret.
+    UiComposition { text: u64 }
+);
+ui_component!(
+    /// How much of an auto-height node's height shows, 0 to 1 (see
+    /// `Node::reveal`). Absent means all of it.
+    UiReveal { amount: f32 }
+);
+ui_component!(
+    /// Input singleton: an action asked for by assistive technology (see
+    /// `perform_access_action`). `kind` 1 focuses `target`, 2 clicks it; 0
+    /// is none. The UI clears it once handled.
+    UiAccessAction { target: u64, kind: u32 }
+);
+ui_component!(UiDragStarted {
+    target: u64,
+    payload: u64
+});
+ui_component!(UiDropped {
+    target: u64,
+    source: u64,
+    payload: u64
+});
+ui_component!(UiDragEnded {
+    target: u64,
+    dropped: u32
+});
+ui_component!(UiMiddleClicked { target: u64 });
 ui_component!(UiToggle { on: u32 });
 ui_component!(UiSlider {
     value: f32,
@@ -359,6 +518,29 @@ ui_component!(
     UiNav { bits: u32 }
 );
 ui_component!(
+    /// Input singleton: a key chord pressed this tick (`key` 0 for none); see
+    /// [`UiShortcut`].
+    UiChord { key: u32, mods: u32 }
+);
+ui_component!(
+    /// State singleton: a press on a draggable node being followed, and the
+    /// middle button's press.
+    UiDnd {
+        source: u64,
+        x: f32,
+        y: f32,
+        dragging: u32,
+        middle_active: u64,
+        prev_middle: u32,
+        press_age: u32,
+        press_x: f32,
+        press_y: f32,
+        press_id: u64,
+        clicks: u32,
+        press_link: u32,
+    }
+);
+ui_component!(
     /// Input singleton: the character typed this tick (0 for none).
     UiTextEntry { ch: u32 }
 );
@@ -450,11 +632,30 @@ fn history_to(h: &crate::text::History, strings: &mut StringTable) -> UiHistory 
 /// The host registers them as it loads images (`register_image`); layout
 /// uses them to size an image whose box is `auto`.
 #[derive(Default, Debug)]
-pub struct ImageSizes(pub BTreeMap<u64, [u32; 2]>);
+pub struct ImageSizes {
+    pub images: BTreeMap<u64, [u32; 2]>,
+    /// What each embedded simulation last drew, by the id a `Viewport`
+    /// component names (`set_viewport_frame`). Host data, not saved.
+    pub viewports: BTreeMap<u32, sage_core::host::Frame>,
+}
 
 /// Tells the UI the pixel size of an image asset.
 pub fn register_image(ecs: &Ecs, asset: u64, size: [u32; 2]) {
-    ecs.ext::<ImageSizes>().borrow_mut().0.insert(asset, size);
+    ecs.ext::<ImageSizes>()
+        .borrow_mut()
+        .images
+        .insert(asset, size);
+}
+
+/// Gives the `Viewport` components with this `source` the frame to draw. Call
+/// it each tick with what the embedded simulation just produced; read the
+/// pointer back from the component. The simulation, its state and its saves
+/// belong to the host: the UI only draws and forwards.
+pub fn set_viewport_frame(ecs: &Ecs, source: u32, frame: sage_core::host::Frame) {
+    ecs.ext::<ImageSizes>()
+        .borrow_mut()
+        .viewports
+        .insert(source, frame);
 }
 
 const STATE_HOVERED: u32 = 1;
@@ -471,6 +672,10 @@ struct Source {
     slider: Option<UiSlider>,
     scroll: Option<UiScroll>,
     caret: Option<UiCaret>,
+    drag: Option<UiDrag>,
+    zone: Option<UiDropZone>,
+    viewport: Option<UiViewport>,
+    cross: Option<UiScrollCross>,
     field: Option<UiTextField>,
     hist: Option<UiHistory>,
     label: Option<UiLabel>,
@@ -520,6 +725,18 @@ fn build(
         let caret = e.try_get::<&UiCaret>(|c| *c);
         let field = e.try_get::<&UiTextField>(|c| *c);
         let rich = e.try_get::<&UiRich>(|c| *c);
+        let drag = e.try_get::<&UiDrag>(|c| *c);
+        let draggable = e.try_get::<&UiDraggable>(|c| *c);
+        let zone = e.try_get::<&UiDropZone>(|c| *c);
+        let shape = e.try_get::<&UiShape>(|c| *c);
+        let access = e.try_get::<&UiAccess>(|c| *c);
+        let svg = e.try_get::<&UiSvg>(|c| *c);
+        let order = e.try_get::<&UiOrder>(|c| c.key);
+        let reveal = e.try_get::<&UiReveal>(|c| c.amount);
+        let sticky = e.try_get::<&UiSticky>(|c| *c);
+        let cross = e.try_get::<&UiScrollCross>(|c| *c);
+        let viewport = e.try_get::<&UiViewport>(|c| *c);
+        let shortcut = e.try_get::<&UiShortcut>(|c| *c);
         let space = e.try_get::<&UiSpace>(|c| *c);
         let grid = e.try_get::<&UiGrid>(|c| *c);
         let cell = e.try_get::<&UiCell>(|c| *c);
@@ -566,6 +783,54 @@ fn build(
             text = strings.get(l.text).unwrap_or("").to_string();
             n.text = text.clone();
         }
+        if let Some(d) = drag.filter(|d| d.on != 0) {
+            n.drag = Some([d.x, d.y]);
+        }
+        n.access = access.map(|a| AccessInfo {
+            role: a.role,
+            level: a.level,
+            hidden: a.hidden != 0,
+            name: strings.get(a.name).unwrap_or("").to_string(),
+            description: strings.get(a.description).unwrap_or("").to_string(),
+            labelled_by: a.labelled_by,
+            label_for: a.label_for,
+        });
+        if let Some(v) = svg {
+            match crate::svg::parse(strings.get(v.markup).unwrap_or("")) {
+                Ok(doc) => {
+                    // With no size of its own, the node is as big as the
+                    // document's view box.
+                    if matches!(n.width, Size::Auto) {
+                        n.width = Size::Fixed(doc.view[2]);
+                    }
+                    if matches!(n.height, Size::Auto) {
+                        n.height = Size::Fixed(doc.view[3]);
+                    }
+                    n.svg = Some(doc);
+                }
+                Err(_) => n.svg_error = true,
+            }
+        }
+        n.order = order.unwrap_or(0);
+        n.reveal = reveal.unwrap_or(1.0);
+        n.sticky = sticky.filter(|s| s.on != 0).map(|s| s.inset);
+        if let Some(c) = cross.filter(|c| c.on != 0) {
+            n.scroll_cross = true;
+            n.scroll_offset_cross = c.offset;
+        }
+        n.shape = shape.map(|s| ShapeNode {
+            kind: s.kind,
+            pts: [[s.x0, s.y0], [s.x1, s.y1], [s.x2, s.y2]],
+            width: s.width,
+            color: s.color,
+        });
+        n.viewport = viewport.map(|v| ViewportNode {
+            frame: sizes.viewports.get(&v.source).cloned(),
+            ..ViewportNode::default()
+        });
+        n.draggable = draggable.map(|d| (d.payload, d.kind));
+        n.drop_kinds = zone.map_or(0, |z| z.kinds);
+        n.shortcut = shortcut.filter(|s| s.key != 0).map(|s| [s.key, s.mods]);
         if let Some(sp) = space {
             n.margin = [
                 sp.margin_left,
@@ -665,7 +930,7 @@ fn build(
                 fit: Fit::from_u32(i.fit),
                 tint: i.tint,
                 size: sizes
-                    .0
+                    .images
                     .get(&i.asset)
                     .map_or([0.0; 2], |s| [s[0] as f32, s[1] as f32]),
                 frame: i.frame,
@@ -744,6 +1009,10 @@ fn build(
             slider,
             scroll,
             caret,
+            drag,
+            zone,
+            viewport,
+            cross,
             field,
             hist,
             label,
@@ -752,6 +1021,18 @@ fn build(
             layer,
             text,
         });
+    }
+    // The pre-edit text goes to the focused text input.
+    let pre = world.get::<&UiComposition>(|c| c.text);
+    let focus = world.get::<&UiInteraction>(|i| i.focus);
+    if pre != 0
+        && let Some(text) = strings.get(pre)
+        && let Some(n) = tree
+            .nodes
+            .iter_mut()
+            .find(|n| n.id == focus && n.widget == Widget::TextInput)
+    {
+        n.field.preedit = text.to_string();
     }
     (tree, sources)
 }
@@ -768,6 +1049,7 @@ fn step(world: &WorldRef, strings: &RefCell<StringTable>, sizes: &RefCell<ImageS
         .get::<&UiTextEntry>(|t| char::from_u32(t.ch))
         .filter(|c| *c != '\0');
     let before = world.get::<&UiInteraction>(|i| *i);
+    let dnd_before = world.get::<&UiDnd>(|d| *d);
     let mut state = UiState {
         hot: before.hot,
         active: before.active,
@@ -775,12 +1057,33 @@ fn step(world: &WorldRef, strings: &RefCell<StringTable>, sizes: &RefCell<ImageS
         prev_down: before.prev_down != 0,
         prev_secondary: before.prev_secondary != 0,
         prev_nav: before.prev_nav,
+        prev_middle: dnd_before.prev_middle != 0,
+        middle_active: dnd_before.middle_active,
+        dnd: Dnd {
+            source: dnd_before.source,
+            origin: [dnd_before.x, dnd_before.y],
+            dragging: dnd_before.dragging != 0,
+        },
+        last_press: LastPress {
+            age: dnd_before.press_age,
+            pos: [dnd_before.press_x, dnd_before.press_y],
+            id: dnd_before.press_id,
+            count: dnd_before.clicks,
+        },
+        press_link: dnd_before.press_link,
         scrolled: false,
     };
+    let chord = world.get::<&UiChord>(|c| *c);
     let input = UiInput {
         pointer: (pointer.present != 0).then_some([pointer.x, pointer.y]),
         down: pointer.down & 1 != 0,
         secondary: pointer.down & 2 != 0,
+        middle: pointer.down & 4 != 0,
+        access: {
+            let a = world.get::<&UiAccessAction>(|a| *a);
+            (a.kind != 0).then_some((a.target, a.kind))
+        },
+        chord: (chord.key != 0).then_some([chord.key, chord.mods]),
         nav,
         ch,
         wheel: pointer.wheel,
@@ -789,6 +1092,7 @@ fn step(world: &WorldRef, strings: &RefCell<StringTable>, sizes: &RefCell<ImageS
             strings.borrow().get(t).map(str::to_string)
         },
     };
+    world.set(UiAccessAction::default());
     // A modal drops focus that is outside it; a layer that opens remembers
     // the focus from before that, to give it back on close.
     let focus_before_update = state.focus;
@@ -844,6 +1148,57 @@ fn step(world: &WorldRef, strings: &RefCell<StringTable>, sizes: &RefCell<ImageS
         {
             e.set(UiSlider {
                 value: n.value,
+                ..old
+            });
+        }
+        if let Some(old) = src.drag {
+            let new = match n.drag {
+                Some([x, y]) => UiDrag { x, y, on: 1 },
+                None => UiDrag { on: 0, ..old },
+            };
+            if new != old {
+                e.set(new);
+            }
+        }
+        if let Some(old) = src.viewport {
+            let new = match &n.viewport {
+                Some(v) => {
+                    let world = v.frame.as_ref().map_or([0.0; 2], |f| f.world_size);
+                    let (scale, origin) = crate::draw::viewport_fit(n.rect, world);
+                    match v.pointer {
+                        Some(p) if scale > 0.0 => UiViewport {
+                            x: (p[0] + n.rect.x - origin[0]) / scale,
+                            y: world[1] - (p[1] + n.rect.y - origin[1]) / scale,
+                            over: 1,
+                            down: v.buttons,
+                            ..old
+                        },
+                        _ => UiViewport {
+                            over: 0,
+                            down: 0,
+                            ..old
+                        },
+                    }
+                }
+                None => old,
+            };
+            if new != old {
+                e.set(new);
+            }
+        }
+        if let Some(old) = src.cross
+            && old.offset != n.scroll_offset_cross
+        {
+            e.set(UiScrollCross {
+                offset: n.scroll_offset_cross,
+                ..old
+            });
+        }
+        if let Some(old) = src.zone
+            && (old.over != 0) != n.drop_over
+        {
+            e.set(UiDropZone {
+                over: n.drop_over as u32,
                 ..old
             });
         }
@@ -956,6 +1311,20 @@ fn step(world: &WorldRef, strings: &RefCell<StringTable>, sizes: &RefCell<ImageS
         prev_secondary: state.prev_secondary as u32,
         prev_nav: state.prev_nav,
     });
+    world.set(UiDnd {
+        source: state.dnd.source,
+        x: state.dnd.origin[0],
+        y: state.dnd.origin[1],
+        dragging: state.dnd.dragging as u32,
+        middle_active: state.middle_active,
+        prev_middle: state.prev_middle as u32,
+        press_age: state.last_press.age,
+        press_x: state.last_press.pos[0],
+        press_y: state.last_press.pos[1],
+        press_id: state.last_press.id,
+        clicks: state.last_press.count,
+        press_link: state.press_link,
+    });
 
     // Events last, so observers see the updated state.
     let by_sid: BTreeMap<u64, u64> = sources.iter().map(|s| (s.sid, s.entity)).collect();
@@ -986,9 +1355,85 @@ fn step(world: &WorldRef, strings: &RefCell<StringTable>, sizes: &RefCell<ImageS
                 let link = strings.borrow_mut().intern(&link);
                 e.emit(&UiNavigate { target, link })
             }
+            EventKind::Drag(phase, dx, dy) => e.emit(&UiDragged {
+                target,
+                phase,
+                dx,
+                dy,
+            }),
+            EventKind::MiddleClicked => e.emit(&UiMiddleClicked { target }),
+            EventKind::DragStarted(payload) => e.emit(&UiDragStarted { target, payload }),
+            EventKind::Dropped(source, payload) => e.emit(&UiDropped {
+                target,
+                source,
+                payload,
+            }),
+            EventKind::DragEnded(dropped) => e.emit(&UiDragEnded {
+                target,
+                dropped: dropped as u32,
+            }),
             EventKind::Copied(_) => {}
         };
     }
+}
+
+/// The accessibility tree of the current UI (see `access`): what a screen
+/// reader would be told. Reads only.
+pub fn access_tree(world: &World, ecs: &Ecs) -> Vec<crate::access::AccessNode> {
+    let screen = world.get::<&UiScreen>(|s| *s);
+    let focus = world.get::<&UiInteraction>(|i| i.focus);
+    let strings = ecs.strings();
+    let sizes = ecs.ext::<ImageSizes>();
+    let (mut tree, _) = build(&world.world(), &strings.borrow(), &sizes.borrow(), true);
+    layout(&mut tree, [screen.w, screen.h]);
+    crate::access::tree(&tree, focus)
+}
+
+/// Tells the UI the answer to a native file dialog it asked for (see
+/// [`UiFileDialog`]): `Some(path)` for a chosen file, `None` for a cancel. The
+/// field that asked gets a `FileAnswered` event.
+pub fn answer_file_dialog(world: &World, ecs: &Ecs, path: Option<&str>) {
+    let d = world.get::<&UiFileDialog>(|d| *d);
+    let result = path.map_or(0, |p| ecs.intern(p));
+    let done = if path.is_some() { 1 } else { 2 };
+    world.set(UiFileDialog {
+        request: 0,
+        target: 0,
+        result: 0,
+        done: 0,
+    });
+    if let Some(e) = ecs.entity_of_sid(d.target) {
+        world.entity_from_id(e).emit(&UiFileAnswered {
+            target: d.target,
+            path: result,
+            done,
+        });
+    }
+}
+
+/// Queues an action from assistive technology for the next tick: focus the
+/// node with this StableId, or click it. Returns false for an action the UI
+/// does not do.
+pub fn perform_access_action(world: &World, target: u64, action: accesskit::Action) -> bool {
+    let kind = match action {
+        accesskit::Action::Focus => 1,
+        accesskit::Action::Click => 2,
+        _ => return false,
+    };
+    world.set(UiAccessAction { target, kind });
+    true
+}
+
+/// The accessibility tree as an `accesskit` update, for a platform adapter.
+pub fn access_update(world: &World, ecs: &Ecs) -> accesskit::TreeUpdate {
+    let screen = world.get::<&UiScreen>(|s| *s);
+    let focus = world.get::<&UiInteraction>(|i| i.focus);
+    crate::access_kit::tree_update(&access_tree(world, ecs), focus, [screen.w, screen.h])
+}
+
+/// [`access_tree`] as indented text, one node a line.
+pub fn access_outline(world: &World, ecs: &Ecs) -> String {
+    crate::access::outline(&access_tree(world, ecs))
 }
 
 /// The current UI as plain draw data, for presentation. Reads only.
@@ -1063,6 +1508,30 @@ pub fn setup(world: &World, ecs: &Ecs) -> Result<(), String> {
         UiCaret => "sage::ui::Caret",
         UiTextField => "sage::ui::TextField",
         UiRich => "sage::ui::Rich",
+        UiDrag => "sage::ui::Drag",
+        UiDragged => "sage::ui::Dragged",
+        UiDraggable => "sage::ui::Draggable",
+        UiDropZone => "sage::ui::DropZone",
+        UiShortcut => "sage::ui::Shortcut",
+        UiAccess => "sage::ui::Access",
+        UiMedia => "sage::ui::Media",
+        UiSvg => "sage::ui::Svg",
+        UiAccessAction => "sage::ui::AccessAction",
+        UiReveal => "sage::ui::Reveal",
+        UiFileDialog => "sage::ui::FileDialog",
+        UiComposition => "sage::ui::Composition",
+        UiFileAnswered => "sage::ui::FileAnswered",
+        UiOrder => "sage::ui::Order",
+        UiSticky => "sage::ui::Sticky",
+        UiScrollCross => "sage::ui::ScrollCross",
+        UiShape => "sage::ui::Shape",
+        UiViewport => "sage::ui::Viewport",
+        UiDragStarted => "sage::ui::DragStarted",
+        UiDropped => "sage::ui::Dropped",
+        UiDragEnded => "sage::ui::DragEnded",
+        UiMiddleClicked => "sage::ui::MiddleClicked",
+        UiChord => "sage::ui::Chord",
+        UiDnd => "sage::ui::Dnd",
         UiSpace => "sage::ui::Space",
         UiGrid => "sage::ui::Grid",
         UiCell => "sage::ui::Cell",
@@ -1131,6 +1600,11 @@ pub fn setup(world: &World, ecs: &Ecs) -> Result<(), String> {
     );
     world.set(UiPointer::default());
     world.set(UiNav::default());
+    world.set(UiChord::default());
+    world.set(UiAccessAction::default());
+    world.set(UiFileDialog::default());
+    world.set(UiComposition::default());
+    world.set(UiDnd::default());
     world.set(UiTextEntry::default());
     world.set(UiClipboard::default());
     world.set(UiScreen { w: 320.0, h: 180.0 });

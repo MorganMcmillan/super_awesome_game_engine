@@ -54,6 +54,36 @@ pub const UI_GLYPH: [f32; 2] = [5.0, 7.0];
 pub const UI_ADVANCE: f32 = 6.0;
 pub const UI_LINE_HEIGHT: f32 = 9.0;
 
+/// How wide text is, for a face that is not the fixed grid. Presentation
+/// installs one for the thread that runs the UI ([`set_text_metrics`]); layout
+/// asks it for the width of static text (labels, buttons, paragraphs). Text
+/// inputs always use the fixed grid, because the caret and selection count
+/// columns.
+pub trait TextMetrics {
+    /// The width of one line of text at scale 1, in UI units, with any
+    /// kerning applied.
+    fn line_width(&self, line: &str) -> f32;
+    /// The distance between lines at scale 1.
+    fn line_height(&self) -> f32;
+}
+
+thread_local! {
+    static METRICS: std::cell::RefCell<Option<std::rc::Rc<dyn TextMetrics>>> = const { std::cell::RefCell::new(None) };
+}
+
+/// Installs (or, with `None`, removes) the proportional text metrics of this
+/// thread. It is per thread so two UIs on two threads (tests) never see each
+/// other's face; a world and the layout that reads its metrics run on one
+/// thread.
+pub fn set_text_metrics(m: Option<std::rc::Rc<dyn TextMetrics>>) {
+    METRICS.with(|c| *c.borrow_mut() = m);
+}
+
+/// The metrics installed for this thread, if any.
+pub fn text_metrics() -> Option<std::rc::Rc<dyn TextMetrics>> {
+    METRICS.with(|c| c.borrow().clone())
+}
+
 /// Navigation bits, the UI's keyboard and gamepad input. A host sets them
 /// from its own keys; they are held-state, and the UI acts on the edge of a
 /// bit (pressed this tick, not held).
@@ -81,6 +111,20 @@ pub const NAV_CUT: u32 = 1 << 18;
 pub const NAV_PASTE: u32 = 1 << 19;
 pub const NAV_UNDO: u32 = 1 << 20;
 pub const NAV_REDO: u32 = 1 << 21;
+/// Alt is held (a held modifier, like `NAV_SHIFT`).
+pub const NAV_ALT: u32 = 1 << 22;
+
+/// Modifier bits of a key chord (`UiInput::chord`).
+pub const CHORD_CTRL: u32 = 1;
+pub const CHORD_SHIFT: u32 = 2;
+pub const CHORD_ALT: u32 = 4;
+/// Key codes of a chord: letters and digits are their upper-case ASCII, the
+/// function keys F1 to F12 are `CHORD_F1 + n - 1`.
+pub const CHORD_F1: u32 = 0x100;
+
+/// Text style bits (`UiDraw::Text::style`).
+pub const STYLE_BOLD: u8 = 1;
+pub const STYLE_ITALIC: u8 = 2;
 
 /// One thing the UI module wants drawn. Colors are straight-alpha RGBA.
 #[derive(Clone, Debug, PartialEq)]
@@ -100,6 +144,10 @@ pub enum UiDraw {
         scale: f32,
         color: [u8; 4],
         clip: Option<[f32; 4]>,
+        /// `STYLE_BOLD` and `STYLE_ITALIC` bits. A face with styled glyphs
+        /// draws them; the built-in face draws bold by striking twice and
+        /// has no italic.
+        style: u8,
     },
     /// An image asset (`AssetId`, the hash of its normalized path) stretched
     /// over a rectangle. `uv` is the part of the image shown (`[u0, v0, u1,
@@ -140,6 +188,15 @@ pub enum UiDraw {
         color: [u8; 4],
         clip: Option<[f32; 4]>,
     },
+    /// A filled triangle with a color at each corner, blended across it. The
+    /// points are in UI units, in any winding. Used by canvases, charts and
+    /// vector shapes; a shape that is clipped is cut into triangles first.
+    Triangle {
+        pts: [[f32; 2]; 3],
+        colors: [[u8; 4]; 3],
+    },
+    /// A filled convex quadrilateral (a thick line, a rotated rectangle).
+    Quad { pts: [[f32; 2]; 4], color: [u8; 4] },
     /// A rectangle with a color at each corner (top-left, top-right,
     /// bottom-right, bottom-left), blended across it.
     Gradient {

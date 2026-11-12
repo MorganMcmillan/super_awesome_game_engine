@@ -7,6 +7,7 @@ rust-version.workspace = true
 publish.workspace = true
 
 [dependencies]
+accesskit.workspace = true
 flecs_ecs.workspace = true
 pyo3.workspace = true
 sage_assets.workspace = true
@@ -15,3 +16,4 @@ sage_ecs_py.workspace = true
 sage_platform.workspace = true
 sage_script.workspace = true
 sage_ui.workspace = true
+

@@ -7,6 +7,10 @@ rust-version.workspace = true
 publish.workspace = true
 
 [dependencies]
+accesskit.workspace = true
 sage_core.workspace = true
 sage_assets.workspace = true
 sdl3.workspace = true
+
+[target.'cfg(windows)'.dependencies]
+accesskit_windows.workspace = true

@@ -4,7 +4,7 @@ use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
 
-use crate::{AssetId, Image, Sound, fnv1a, normalize_path, wav};
+use crate::{AssetId, Image, Sound, fnv1a, normalize_path};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub enum AssetKind {
@@ -17,7 +17,7 @@ impl AssetKind {
         let ext = path.rsplit('.').next()?.to_ascii_lowercase();
         match ext.as_str() {
             "png" => Some(AssetKind::Image),
-            "wav" => Some(AssetKind::Sound),
+            "wav" | "ogg" | "mp3" => Some(AssetKind::Sound),
             _ => None,
         }
     }
@@ -127,7 +127,8 @@ impl AssetStore {
         {
             return Ok((id, snd.clone()));
         }
-        let snd = Rc::new(wav::decode(&bytes).map_err(|e| format!("{path}: {e}"))?);
+        let snd =
+            Rc::new(crate::compressed::decode_any(&bytes).map_err(|e| format!("{path}: {e}"))?);
         self.decodes += 1;
         self.sounds.insert(id, (hash, snd.clone()));
         Ok((id, snd))
@@ -159,6 +160,7 @@ impl AssetStore {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::wav;
 
     fn temp_root(name: &str) -> PathBuf {
         let dir = std::env::temp_dir().join(format!("sage_assets_{name}_{}", std::process::id()));
@@ -218,5 +220,24 @@ mod tests {
         let err = store.load_image("bad.png").unwrap_err();
         assert!(err.contains("bad.png"), "{err}");
         let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn ogg_and_mp3_files_are_sounds_the_store_decodes_by_content() {
+        let dir = temp_root("compressed");
+        let data = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/data/");
+        std::fs::copy(format!("{data}tone440.ogg"), dir.join("a.ogg")).unwrap();
+        std::fs::copy(format!("{data}tone440.mp3"), dir.join("b.mp3")).unwrap();
+        // A file whose name lies about its content is still decoded as what
+        // it is.
+        std::fs::copy(format!("{data}tone440.ogg"), dir.join("c.mp3")).unwrap();
+        let mut store = AssetStore::new(&dir);
+        let cat = store.catalog().unwrap();
+        assert!(cat.iter().all(|e| e.kind == AssetKind::Sound), "{cat:?}");
+        for name in ["a.ogg", "b.mp3", "c.mp3"] {
+            let (_, s) = store.load_sound(name).unwrap();
+            assert!(s.duration_secs() > 0.1, "{name}");
+        }
+        std::fs::remove_dir_all(&dir).ok();
     }
 }

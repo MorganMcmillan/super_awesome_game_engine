@@ -176,13 +176,15 @@ def is_open(l):
 ui.layer, ui.open, ui.close, ui.is_open = layer, open_layer, close_layer, is_open
 
 
-def dialog(**style):
+def dialog(name=None, **style):
     """A modal dialog: returns (backdrop, box). Fill `box`, then `ui.open(backdrop)`.
     The backdrop blocks the pointer, keyboard focus stays inside the box, Escape
-    closes it, and focus returns to what had it."""
+    closes it, and focus returns to what had it. `name` is what a screen
+    reader calls it."""
     back = layer(None, at=(0, 0), gap=0.0, prefab=ui.Backdrop, dismiss=True, autofocus=True)
     back.set(Modal(1))
     box = ui.add(ui.Dialog, back, **style)
+    ui.role(box, "dialog", name=name)
     return back, box
 
 
@@ -204,6 +206,7 @@ class KitHost:
 
 _tip_layer = layer(None, at=(0, 0), prefab=ui.Tip, dismiss=False, autofocus=False)
 _tip_text = ui.add(ui.Text, _tip_layer, text="")
+ui.role(_tip_layer, "tooltip")
 _kit = world.entity()
 _kit.set(TooltipState())
 _kit.add(KitHost)
@@ -262,11 +265,14 @@ def select(parent, options, value=0, **style):
     one. Reacts with `Selected` events (`target` is the returned entity)."""
     btn = ui.add(ui.Dropdown, parent, **style)
     shown = ui.add(ui.Text, btn, text=options[value] if options else "")
-    ui.add(ui.Text, btn, text="V")
+    ui.role(ui.add(ui.Text, btn, text="V"), "text", hidden=True)
     popup = layer(btn, match_width=True, autofocus=True)
+    ui.role(btn, "combobox")
+    ui.role(popup, "listbox")
     for i, text in enumerate(options):
         item = ui.add(ui.Option, popup, text=text)
         item.set(Option(i, btn.sid))
+        ui.role(item, "option")
     btn.set(Select(value, len(options), popup.sid, shown.sid))
     return btn
 
@@ -276,9 +282,12 @@ def combo(parent, options, text="", **style):
     Picking one fills the input and emits `Selected`."""
     inp = ui.add(ui.TextInput, parent, text=text, **style)
     popup = layer(inp, match_width=True, autofocus=False)
+    ui.role(inp, "combobox")
+    ui.role(popup, "listbox")
     for i, opt in enumerate(options):
         item = ui.add(ui.Option, popup, text=opt)
         item.set(Option(i, inp.sid))
+        ui.role(item, "option")
     inp.set(Combo(popup.sid, len(options)))
     return inp
 
@@ -326,6 +335,7 @@ def _item(popup, spec):
     if spec == "-":
         sep = ui.add(ui.Sep, popup)
         sep.set(MenuItem(0, SEPARATOR, 0, 0))
+        ui.role(sep, "separator")
         return sep
     text, opts = (spec, {}) if isinstance(spec, str) else spec
     flags = 0
@@ -335,13 +345,17 @@ def _item(popup, spec):
         flags |= DISABLED
     row = ui.add(ui.MenuItem, popup, enabled=not opts.get("disabled", False))
     mark = ui.add(ui.Text, row, text="* " if flags & CHECKED else "  ", width=10)
+    ui.role(row, "menuitem")
+    ui.role(mark, "text", hidden=True)
+    if flags & CHECK:
+        ui.role(row, None, description="CHECKED" if flags & CHECKED else "NOT CHECKED")
     ui.add(ui.Text, row, text=text, width=ui.fill())
     if opts.get("shortcut"):
         ui.add(ui.Text, row, text=opts["shortcut"], color=0x7C7468FF)
     sub_sid = 0
     if opts.get("sub"):
         flags |= SUBMENU
-        ui.add(ui.Text, row, text=">")
+        ui.role(ui.add(ui.Text, row, text=">"), "text", hidden=True)
         sub = _menu_popup(row, opts["sub"], placement="right")
         sub_sid = sub.sid
     row.set(MenuItem(opts.get("id", 0), flags, sub_sid, mark.sid))
@@ -350,19 +364,21 @@ def _item(popup, spec):
 
 def _menu_popup(anchor, items, placement="below", at=None):
     popup = layer(anchor, placement=placement, at=at, gap=0.0, autofocus=True)
+    ui.role(popup, "menu")
     for spec in items:
         _item(popup, spec)
     return popup
 
 
 def menu_bar(parent=None, **style):
-    return ui.add(ui.MenuBar, parent, **style)
+    return ui.role(ui.add(ui.MenuBar, parent, **style), "menubar")
 
 
 def menu(bar, title, items):
     """A top-level menu in `bar`. Returns the title button. Choosing an item
     emits `MenuChosen` on it (`id` is the item's `id`)."""
     t = ui.add(ui.MenuTitle, bar, text=title)
+    ui.role(t, "menuitem")
     popup = _menu_popup(t, items)
     t.set(MenuTitle(popup.sid, bar.sid))
     return t

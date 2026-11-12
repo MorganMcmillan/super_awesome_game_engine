@@ -31,6 +31,10 @@ import sage
 from sage import OnUpdate
 from sage.ui import (
     Absolute,
+    Access,
+    Order,
+    ScrollCross,
+    Sticky,
     Box,
     Caret,
     Decor,
@@ -57,6 +61,43 @@ from sage.ui import (
 from sage.ui import Grid as GridC
 from sage.ui import Image as ImageC
 from sage.ui import Slice as SliceC
+
+# Roles, by the number `Access.role` holds (the order of `access::Role`; a
+# test keeps this list in step with it).
+ROLE_NAMES = [
+    "generic", "button", "checkbox", "radio", "switch", "slider", "textbox", "link", "heading", "list",
+    "listitem", "table", "row", "cell", "columnheader", "tab", "tablist", "tabpanel", "tree", "treeitem",
+    "menu", "menubar", "menuitem", "dialog", "tooltip", "progressbar", "separator", "navigation", "banner",
+    "contentinfo", "main", "region", "form", "group", "img", "text", "combobox", "listbox", "option",
+    "radiogroup", "label", "application",
+]
+ROLES = {name: k for k, name in enumerate(ROLE_NAMES)}
+
+
+def role(e, role, name=None, description=None, level=None, hidden=None, labelled_by=None, label_for=None):
+    """Says what `e` is to a screen reader. `role` is a name (`"button"`,
+    `"navigation"`, `"heading"`...) or a number; widgets already imply one,
+    so this is for what they cannot know: a landmark, a heading level, a
+    name that is not the text shown, or `labelled_by=` / `label_for=`
+    (entities). Only the arguments given change; the rest stay."""
+    a = e.get(Access).copy() if e.has(Access) else Access()
+    if role is not None:
+        a.role = ROLES[role] if isinstance(role, str) else int(role)
+    if name is not None:
+        a.name = world.intern(name) if name else 0
+    if description is not None:
+        a.description = world.intern(description) if description else 0
+    if level is not None:
+        a.level = int(level)
+    if hidden is not None:
+        a.hidden = 1 if hidden else 0
+    if labelled_by is not None:
+        a.labelled_by = labelled_by.sid if labelled_by else 0
+    if label_for is not None:
+        a.label_for = label_for.sid if label_for else 0
+    e.set(a)
+    return e
+
 
 COLUMN, ROW = 0, 1
 START, CENTER, END, STRETCH = 0, 1, 2, 3
@@ -185,7 +226,8 @@ class Ui:
             image=None, fit=None, tint=None, frame=None, cols=None, rows=None, slice=None,
             radius=None, shadow=None, gradient=None, fade=None, display=None, transition=None,
             states=None, margin=None, min_width=None, max_width=None, min_height=None, max_height=None,
-            aspect=None, align_self=None, offset=None, grid=None, cell=None, wrap_flow=None):
+            aspect=None, align_self=None, offset=None, grid=None, cell=None, wrap_flow=None,
+            order=None, sticky=None):
         """An instance of `prefab` under `parent` with the given style.
 
         Spacing: `margin` (a number, `(x, y)` or `(l, t, r, b)`), `min_*`/`max_*`
@@ -235,6 +277,10 @@ class Ui:
             e.set(Cell(col_, row_, spans[0] if spans else 1, spans[1] if len(spans) > 1 else 1))
         if wrap_flow is not None:
             e.set(WrapFlow(1, float(wrap_flow)))
+        if order is not None:
+            e.set(Order(int(order)))
+        if sticky is not None:
+            e.set(Sticky(float(sticky), 1))
         paint = {k: v for k, v in (("fill", fill), ("border", border), ("border_width", border_width), ("accent", accent)) if v is not None}
         if paint:
             _update(e, Paint, **paint)
@@ -299,6 +345,9 @@ class Ui:
             _update(e, States, **fields)
         return e
 
+    role = staticmethod(role)
+    ROLE_NAMES = ROLE_NAMES
+
     def panel(self, parent=None, **style):
         return self.add(self.Panel, parent, **style)
 
@@ -308,7 +357,8 @@ class Ui:
     def heading(self, parent, text, level=1, **style):
         """`<h1>` to `<h3>`: the same text at three sizes (3, 2 and 1 times
         the glyph size; the face is a bitmap)."""
-        return self.add(getattr(self, "H%d" % max(1, min(3, level))), parent, text=text, **style)
+        e = self.add(getattr(self, "H%d" % max(1, min(3, level))), parent, text=text, **style)
+        return role(e, "heading", level=level)
 
     def rich(self, parent, markup, **style):
         """A paragraph of rich text that wraps to its width. The markup:
@@ -321,7 +371,7 @@ class Ui:
 
     def link(self, parent, label, target, **style):
         """A single link: rich text that is all one link."""
-        return self.rich(parent, "[%s](%s)" % (label, target), **style)
+        return role(self.rich(parent, "[%s](%s)" % (label, target), **style), "link")
 
     def button(self, parent, text, **style):
         return self.add(self.Button, parent, text=text, **style)
@@ -343,7 +393,7 @@ class Ui:
         e = self.add(self.Toggle, parent, **style)
         e.set(Toggle(1 if on else 0))
         if text is not None:
-            self.text(row, text)
+            role(self.text(row, text), "label", label_for=e)
         return e
 
     def slider(self, parent, value=0.0, low=0.0, high=1.0, step=0.0, **style):
@@ -380,10 +430,15 @@ class Ui:
         e.set(Slider(float(value), float(low), float(high), float(step)))
         return self._field(e, 4, "", 24)
 
-    def image(self, parent, source, **style):
+    def image(self, parent, source, alt=None, **style):
         """An `<img>`: `source` is a path or an `ui.asset(path)` id. With no
-        size it is as big as the image; `fit=` places it in a bigger box."""
-        return self.add(self.Image, parent, image=source, **style)
+        size it is as big as the image; `fit=` places it in a bigger box.
+        `alt` is the text a screen reader says for it ("" marks it as
+        decoration and leaves it out)."""
+        e = self.add(self.Image, parent, image=source, **style)
+        if alt is not None:
+            role(e, "img", name=alt, hidden=(alt == ""))
+        return e
 
     def meter(self, parent, value=0.0, low=0.0, high=1.0, **style):
         """A read-only bar (a progress bar). Set its `Slider` value to move it."""
@@ -405,22 +460,28 @@ class Ui:
         """`<ul>` and `<ol>`: a column of rows, each a marker (a bullet, or
         the number) and the item's text. `items` are strings (or `(markup,)`
         for rich text). Returns the list of row entities."""
-        col = self.add(self.Panel, parent, direction=COLUMN, gap=2, **style)
+        col = role(self.add(self.Panel, parent, direction=COLUMN, gap=2, **style), "list")
         rows_ = []
         for k, item in enumerate(items):
-            row = self.add(self.Panel, col, direction=ROW, gap=4, align=START, width=self.fill())
+            row = role(self.add(self.Panel, col, direction=ROW, gap=4, align=START, width=self.fill()), "listitem")
             mark = ("%d." % (start + k)) if ordered else "-"
-            self.add(self.Text, row, text=mark, width=12 if ordered else 6)
+            role(self.add(self.Text, row, text=mark, width=12 if ordered else 6), "text", hidden=True)
             self.rich(row, item, width=self.fill()) if isinstance(item, tuple) else self.add(self.Text, row, text=item, wrap=True, width=self.fill())
             rows_.append(row)
         return rows_
 
-    def scroll(self, parent=None, **style):
+    def scroll(self, parent=None, both=False, **style):
         """A panel whose content scrolls along its flow direction (the wheel,
         PageUp/PageDown, or tabbing to a hidden widget). Give it a fixed or
-        filling size along that direction, or there is nothing to scroll."""
+        filling size along that direction, or there is nothing to scroll.
+        `both=True` also scrolls across the flow (Shift and the wheel); give
+        something inside it a width (or height) larger than the view. A child
+        made with `sticky=inset` holds that far from the top once scrolled
+        past."""
         e = self.add(self.Panel, parent, **style)
         e.set(Scroll(0.0))
+        if both:
+            e.set(ScrollCross(1, 0.0))
         return e
 
 

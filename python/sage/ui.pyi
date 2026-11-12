@@ -13,6 +13,27 @@ class Absolute(Component):
     def __init__(self, x: f32 = ..., y: f32 = ...) -> None: ...
 
 
+class Access(Component):
+    """Native component `sage.ui.Access`."""
+
+    role: u32
+    level: u32
+    hidden: u32
+    name: u64
+    description: u64
+    labelled_by: u64
+    label_for: u64
+    def __init__(self, role: u32 = ..., level: u32 = ..., hidden: u32 = ..., name: u64 = ..., description: u64 = ..., labelled_by: u64 = ..., label_for: u64 = ...) -> None: ...
+
+
+class AccessAction(Component):
+    """Native component `sage.ui.AccessAction`."""
+
+    target: u64
+    kind: u32
+    def __init__(self, target: u64 = ..., kind: u32 = ...) -> None: ...
+
+
 class Box(Component):
     """Native component `sage.ui.Box`."""
 
@@ -48,6 +69,14 @@ class Changed(Component):
     def __init__(self, target: u64 = ..., value: f32 = ...) -> None: ...
 
 
+class Chord(Component):
+    """Native component `sage.ui.Chord`."""
+
+    key: u32
+    mods: u32
+    def __init__(self, key: u32 = ..., mods: u32 = ...) -> None: ...
+
+
 class Clicked(Component):
     """Native component `sage.ui.Clicked`."""
 
@@ -69,6 +98,13 @@ class Combo(Component):
     popup: u64
     count: u32
     def __init__(self, popup: u64 = ..., count: u32 = ...) -> None: ...
+
+
+class Composition(Component):
+    """Native component `sage.ui.Composition`."""
+
+    text: u64
+    def __init__(self, text: u64 = ...) -> None: ...
 
 
 class Context(Component):
@@ -113,6 +149,103 @@ class Display(Component):
 
     none: u32
     def __init__(self, none: u32 = ...) -> None: ...
+
+
+class Dnd(Component):
+    """Native component `sage.ui.Dnd`."""
+
+    source: u64
+    x: f32
+    y: f32
+    dragging: u32
+    middle_active: u64
+    prev_middle: u32
+    press_age: u32
+    press_x: f32
+    press_y: f32
+    press_id: u64
+    clicks: u32
+    press_link: u32
+    def __init__(self, source: u64 = ..., x: f32 = ..., y: f32 = ..., dragging: u32 = ..., middle_active: u64 = ..., prev_middle: u32 = ..., press_age: u32 = ..., press_x: f32 = ..., press_y: f32 = ..., press_id: u64 = ..., clicks: u32 = ..., press_link: u32 = ...) -> None: ...
+
+
+class Drag(Component):
+    """Native component `sage.ui.Drag`."""
+
+    x: f32
+    y: f32
+    on: u32
+    def __init__(self, x: f32 = ..., y: f32 = ..., on: u32 = ...) -> None: ...
+
+
+class DragEnded(Component):
+    """Native component `sage.ui.DragEnded`."""
+
+    target: u64
+    dropped: u32
+    def __init__(self, target: u64 = ..., dropped: u32 = ...) -> None: ...
+
+
+class DragStarted(Component):
+    """Native component `sage.ui.DragStarted`."""
+
+    target: u64
+    payload: u64
+    def __init__(self, target: u64 = ..., payload: u64 = ...) -> None: ...
+
+
+class Draggable(Component):
+    """Native component `sage.ui.Draggable`."""
+
+    payload: u64
+    kind: u32
+    def __init__(self, payload: u64 = ..., kind: u32 = ...) -> None: ...
+
+
+class Dragged(Component):
+    """Native component `sage.ui.Dragged`."""
+
+    target: u64
+    phase: u32
+    dx: f32
+    dy: f32
+    def __init__(self, target: u64 = ..., phase: u32 = ..., dx: f32 = ..., dy: f32 = ...) -> None: ...
+
+
+class DropZone(Component):
+    """Native component `sage.ui.DropZone`."""
+
+    kinds: u32
+    over: u32
+    def __init__(self, kinds: u32 = ..., over: u32 = ...) -> None: ...
+
+
+class Dropped(Component):
+    """Native component `sage.ui.Dropped`."""
+
+    target: u64
+    source: u64
+    payload: u64
+    def __init__(self, target: u64 = ..., source: u64 = ..., payload: u64 = ...) -> None: ...
+
+
+class FileAnswered(Component):
+    """Native component `sage.ui.FileAnswered`."""
+
+    target: u64
+    path: u64
+    done: u32
+    def __init__(self, target: u64 = ..., path: u64 = ..., done: u32 = ...) -> None: ...
+
+
+class FileDialog(Component):
+    """Native component `sage.ui.FileDialog`."""
+
+    request: u32
+    target: u64
+    result: u64
+    done: u32
+    def __init__(self, request: u32 = ..., target: u64 = ..., result: u64 = ..., done: u32 = ...) -> None: ...
 
 
 class Flow(Component):
@@ -227,6 +360,18 @@ class Layer(Component):
     def __init__(self, open: u32 = ..., anchor: u64 = ..., placement: u32 = ..., align: u32 = ..., gap: f32 = ..., x: f32 = ..., y: f32 = ..., flags: u32 = ..., focus: u64 = ..., was_open: u32 = ..., restore: u64 = ...) -> None: ...
 
 
+class Media(Component):
+    """Native component `sage.ui.Media`."""
+
+    source: u64
+    playing: u32
+    position: f32
+    length: f32
+    volume: f32
+    looping: u32
+    def __init__(self, source: u64 = ..., playing: u32 = ..., position: f32 = ..., length: f32 = ..., volume: f32 = ..., looping: u32 = ...) -> None: ...
+
+
 class MenuChosen(Component):
     """Native component `sage.ui.MenuChosen`."""
 
@@ -251,6 +396,13 @@ class MenuTitle(Component):
     popup: u64
     bar: u64
     def __init__(self, popup: u64 = ..., bar: u64 = ...) -> None: ...
+
+
+class MiddleClicked(Component):
+    """Native component `sage.ui.MiddleClicked`."""
+
+    target: u64
+    def __init__(self, target: u64 = ...) -> None: ...
 
 
 class Modal(Component):
@@ -281,6 +433,13 @@ class Option(Component):
     index: i32
     owner: u64
     def __init__(self, index: i32 = ..., owner: u64 = ...) -> None: ...
+
+
+class Order(Component):
+    """Native component `sage.ui.Order`."""
+
+    key: i32
+    def __init__(self, key: i32 = ...) -> None: ...
 
 
 class Paint(Component):
@@ -314,6 +473,13 @@ class Rect(Component):
     def __init__(self, x: f32 = ..., y: f32 = ..., w: f32 = ..., h: f32 = ...) -> None: ...
 
 
+class Reveal(Component):
+    """Native component `sage.ui.Reveal`."""
+
+    amount: f32
+    def __init__(self, amount: f32 = ...) -> None: ...
+
+
 class Rich(Component):
     """Native component `sage.ui.Rich`."""
 
@@ -336,6 +502,14 @@ class Scroll(Component):
     def __init__(self, offset: f32 = ...) -> None: ...
 
 
+class ScrollCross(Component):
+    """Native component `sage.ui.ScrollCross`."""
+
+    on: u32
+    offset: f32
+    def __init__(self, on: u32 = ..., offset: f32 = ...) -> None: ...
+
+
 class Select(Component):
     """Native component `sage.ui.Select`."""
 
@@ -352,6 +526,29 @@ class Selected(Component):
     target: u64
     index: i32
     def __init__(self, target: u64 = ..., index: i32 = ...) -> None: ...
+
+
+class Shape(Component):
+    """Native component `sage.ui.Shape`."""
+
+    kind: u32
+    x0: f32
+    y0: f32
+    x1: f32
+    y1: f32
+    x2: f32
+    y2: f32
+    width: f32
+    color: u32
+    def __init__(self, kind: u32 = ..., x0: f32 = ..., y0: f32 = ..., x1: f32 = ..., y1: f32 = ..., x2: f32 = ..., y2: f32 = ..., width: f32 = ..., color: u32 = ...) -> None: ...
+
+
+class Shortcut(Component):
+    """Native component `sage.ui.Shortcut`."""
+
+    key: u32
+    mods: u32
+    def __init__(self, key: u32 = ..., mods: u32 = ...) -> None: ...
 
 
 class Shown(Component):
@@ -425,11 +622,26 @@ class States(Component):
     def __init__(self, checked_fill: u32 = ..., checked_text: u32 = ..., checked_border: u32 = ..., focus_fill: u32 = ..., focus_text: u32 = ..., focus_border: u32 = ..., hover_fill: u32 = ..., hover_text: u32 = ..., hover_border: u32 = ..., pressed_fill: u32 = ..., pressed_text: u32 = ..., pressed_border: u32 = ..., disabled_fill: u32 = ..., disabled_text: u32 = ..., disabled_border: u32 = ...) -> None: ...
 
 
+class Sticky(Component):
+    """Native component `sage.ui.Sticky`."""
+
+    inset: f32
+    on: u32
+    def __init__(self, inset: f32 = ..., on: u32 = ...) -> None: ...
+
+
 class Submitted(Component):
     """Native component `sage.ui.Submitted`."""
 
     target: u64
     def __init__(self, target: u64 = ...) -> None: ...
+
+
+class Svg(Component):
+    """Native component `sage.ui.Svg`."""
+
+    markup: u64
+    def __init__(self, markup: u64 = ...) -> None: ...
 
 
 class TextChanged(Component):
@@ -495,6 +707,17 @@ class Transition(Component):
 
     ticks: u32
     def __init__(self, ticks: u32 = ...) -> None: ...
+
+
+class Viewport(Component):
+    """Native component `sage.ui.Viewport`."""
+
+    source: u32
+    x: f32
+    y: f32
+    over: u32
+    down: u32
+    def __init__(self, source: u32 = ..., x: f32 = ..., y: f32 = ..., over: u32 = ..., down: u32 = ...) -> None: ...
 
 
 class Widget(Component):

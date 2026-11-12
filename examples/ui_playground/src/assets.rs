@@ -101,3 +101,23 @@ pub fn all() -> Vec<(&'static str, u64, Image)> {
     .map(|(path, image)| (path, AssetId::of_path(path).0, image))
     .collect()
 }
+
+pub const TONE: &str = "sounds/tone.wav";
+
+/// Two seconds of a rising tone with a slow beat, so a player has something
+/// to scrub through. Presentation only: it is not simulation state.
+pub fn tone() -> sage_assets::Sound {
+    let rate = 8_000u32;
+    let samples = (0..rate * 2)
+        .map(|i| {
+            let t = i as f32 / rate as f32;
+            let freq = 220.0 + 110.0 * t;
+            let beat = 0.6 + 0.4 * (t * std::f32::consts::TAU * 2.0).sin().abs();
+            (t * freq * std::f32::consts::TAU).sin() * 0.3 * beat
+        })
+        .collect();
+    sage_assets::Sound {
+        sample_rate: rate,
+        samples,
+    }
+}
