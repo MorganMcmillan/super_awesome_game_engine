@@ -4,7 +4,7 @@
 # press or Escape, with keyboard focus moving in and returning.
 
 import sage
-from sage.ui import Clicked, Label, MenuChosen, Selected
+from sage.ui import Clicked, Combo, Interaction, Label, Layer, MenuChosen, MenuItem, MenuTitle, Select, Selected
 
 ui = world.ui
 T = world.theme
@@ -66,7 +66,7 @@ menu_said = ui.add(T.Body, menus, text="CHOSEN: NOTHING")
 
 context = pcard(pcol_b, "CONTEXT MENU")
 context_area = ui.add(T.Chip, context, text="RIGHT-CLICK HERE", height=34)
-ui.context_menu(
+context_popup = ui.context_menu(
     context_area,
     [("COPY", {"id": 31, "shortcut": "CTRL+C"}), ("PASTE", {"id": 32, "shortcut": "CTRL+V"}), "-", ("DELETE", {"id": 33})],
 )
@@ -117,3 +117,21 @@ def popups_clicks(c: Clicked):
     elif c.target in (confirm_no.sid, confirm_yes.sid):
         say(confirm_said, "ANSWER: " + ("YES" if c.target == confirm_yes.sid else "NO"))
         ui.close(confirm_back)
+
+
+def popup_option(owner, i):
+    """The i-th option entity of a select or combo (for tests and scripts)."""
+    kind = Select if owner.has(Select) else Combo
+    return world.lookup(owner.get(kind).popup).children[i]
+
+
+def menu_item(menu, *path):
+    """The menu row reached by item labels from a menu title (or popup):
+    menu_item(file_menu, "RECENT", "TWO.TXT"). For tests and scripts."""
+    popup = world.lookup(menu.get(MenuTitle).popup) if menu.has(MenuTitle) else menu
+    row = None
+    for label in path:
+        row = next(c for c in popup.children if c.has(MenuItem) and len(c.children) > 1 and world.string(c.children[1].get(Label).text) == label)
+        if row.get(MenuItem).sub:
+            popup = world.lookup(row.get(MenuItem).sub)
+    return row

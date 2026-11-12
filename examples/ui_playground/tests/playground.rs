@@ -619,3 +619,173 @@ fn the_style_page_survives_a_save_game_mid_transition() {
         a.render(SIZE).to_png_bytes().unwrap()
     );
 }
+
+// -- the popups page ------------------------------------------------------------
+
+fn popups() -> Playground {
+    let p = Playground::new().unwrap();
+    p.show_page("POPUPS");
+    p
+}
+
+#[test]
+fn a_select_opens_a_list_picks_an_option_and_closes() {
+    let p = popups();
+    let list = "world.lookup(color_select.get(Select).popup)";
+    assert_eq!(p.rect(list), [0.0; 4], "closed, the list takes no space");
+    p.click("color_select");
+    p.idle(2);
+    assert!(
+        texts(&p).contains(&"VIOLET".to_string()),
+        "the list is open"
+    );
+    let [sx, sy, sw, sh] = p.rect("color_select");
+    let r = p.rect(list);
+    assert!(r[1] >= sy + sh - 1.0, "below the select: {r:?}");
+    assert!(
+        (r[0] - sx).abs() < 1.5 && (r[2] - sw).abs() < 1.5,
+        "as wide: {r:?}"
+    );
+    p.click("popup_option(color_select, 2)");
+    p.idle(2);
+    assert_eq!(p.text("color_said"), "CHOSEN: VIOLET");
+    assert!(!texts(&p).contains(&"TEAL".to_string()), "the list closed");
+}
+
+#[test]
+fn a_combo_box_narrows_its_list_as_you_type_and_picks_one() {
+    let p = popups();
+    p.click("fruit_combo");
+    p.type_text("AP");
+    p.idle(2);
+    let t = texts(&p);
+    assert!(t.contains(&"APPLE".to_string()) && t.contains(&"APRICOT".to_string()));
+    assert!(
+        !t.contains(&"BANANA".to_string()),
+        "non-matches are hidden: {t:?}"
+    );
+    p.click("popup_option(fruit_combo, 1)");
+    p.idle(2);
+    assert_eq!(p.text("fruit_said"), "PICKED: APRICOT");
+    assert!(!texts(&p).contains(&"AVOCADO".to_string()), "closed");
+}
+
+#[test]
+fn the_menu_bar_opens_submenus_and_chooses_items() {
+    let p = popups();
+    p.click("file_menu");
+    p.idle(2);
+    assert!(
+        texts(&p).contains(&"RECENT".to_string()),
+        "the file menu is open"
+    );
+    p.click("menu_item(file_menu, 'RECENT')");
+    p.idle(2);
+    assert!(
+        texts(&p).contains(&"TWO.TXT".to_string()),
+        "the submenu is open"
+    );
+    p.click("menu_item(file_menu, 'RECENT', 'TWO.TXT')");
+    p.idle(2);
+    assert_eq!(p.text("menu_said"), "CHOSEN: TWO.TXT");
+    assert!(
+        !texts(&p).contains(&"RECENT".to_string()),
+        "choosing closes every menu"
+    );
+    // A disabled item does nothing.
+    p.click("file_menu");
+    p.idle(2);
+    p.click("menu_item(file_menu, 'SAVE')");
+    p.idle(2);
+    assert_eq!(p.text("menu_said"), "CHOSEN: TWO.TXT");
+    // Hovering another title while one is open switches menus.
+    p.hover(p.center("view_menu"));
+    p.idle(2);
+    assert!(texts(&p).contains(&"RULERS".to_string()));
+    assert!(!texts(&p).contains(&"RECENT".to_string()));
+    // A check item toggles.
+    p.click("menu_item(view_menu, 'RULERS')");
+    p.idle(2);
+    assert_eq!(p.text("menu_said"), "CHOSEN: RULERS");
+    // Escape closes.
+    p.click("view_menu");
+    p.idle(2);
+    p.press(sage_core::host::NAV_CANCEL);
+    p.idle(2);
+    assert!(!texts(&p).contains(&"RULERS".to_string()));
+}
+
+#[test]
+fn a_right_click_opens_the_context_menu_at_the_pointer() {
+    let p = popups();
+    let [x, y, w, h] = p.rect("context_area");
+    let at = [x + w / 4.0, y + h / 2.0];
+    p.input(&sage_platform::ui_window::UiTickInput {
+        pointer: Some(at),
+        secondary: true,
+        ..Default::default()
+    });
+    p.input(&sage_platform::ui_window::UiTickInput {
+        pointer: Some(at),
+        ..Default::default()
+    });
+    p.idle(2);
+    assert!(texts(&p).contains(&"PASTE".to_string()), "open");
+    let first = p.rect("menu_item(context_popup, 'COPY')");
+    assert!(
+        (first[0] - at[0]).abs() < 12.0,
+        "next to the pointer: {first:?} {at:?}"
+    );
+    p.click("menu_item(context_popup, 'DELETE')");
+    p.idle(2);
+    assert_eq!(p.text("context_said"), "LAST: DELETE");
+    assert!(!texts(&p).contains(&"PASTE".to_string()));
+}
+
+#[test]
+fn a_tooltip_appears_after_its_delay_and_goes_when_the_pointer_leaves() {
+    let p = popups();
+    let rest = |at: [f32; 2], ticks: u32| (0..ticks).for_each(|_| p.hover(at));
+    let shown = |prefix: &str| texts(&p).iter().any(|t| t.starts_with(prefix));
+    let c = p.center("tip_button");
+    rest(c, 5);
+    assert!(!shown("A TOOLTIP APPEARS"), "too early");
+    rest(c, 20);
+    assert!(shown("A TOOLTIP APPEARS"), "after the delay");
+    rest([2.0, 2.0], 2);
+    assert!(!shown("A TOOLTIP APPEARS"), "gone");
+    // The slower one is not up at 30 ticks.
+    let c = p.center("slow_button");
+    rest(c, 30);
+    assert!(!shown("THIS ONE WAITS"));
+    rest(c, 50);
+    assert!(shown("THIS ONE WAITS"));
+    // A tooltip on a group shows for hovering its child.
+    rest(p.center("tip_inner"), 25);
+    assert!(shown("A TOOLTIP ON A GROUP"));
+    // Pressing hides it.
+    p.click("tip_inner");
+    assert!(!shown("A TOOLTIP ON A GROUP"));
+}
+
+#[test]
+fn the_confirm_dialog_returns_focus_to_its_button_and_escape_cancels() {
+    let p = popups();
+    p.click("confirm_button");
+    p.idle(2);
+    assert!(p.eval::<bool>("ui.is_open(confirm_back)"));
+    p.press(sage_core::host::NAV_CANCEL);
+    p.idle(2);
+    assert!(!p.eval::<bool>("ui.is_open(confirm_back)"));
+    assert_eq!(
+        focus(&p),
+        p.eval::<u64>("confirm_button.sid"),
+        "focus returned"
+    );
+    p.click("confirm_button");
+    p.idle(2);
+    p.click("confirm_yes");
+    p.idle(2);
+    assert_eq!(p.text("confirm_said"), "ANSWER: YES");
+    assert!(!p.eval::<bool>("ui.is_open(confirm_back)"));
+}

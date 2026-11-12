@@ -564,6 +564,9 @@ fn step(world: &WorldRef, strings: &RefCell<StringTable>, sizes: &RefCell<ImageS
         ch,
         wheel: pointer.wheel,
     };
+    // A modal drops focus that is outside it; a layer that opens remembers
+    // the focus from before that, to give it back on close.
+    let focus_before_update = state.focus;
     let events = update(&mut tree, &mut state, &input);
     if state.scrolled {
         // Scrolling moved the content: place it again before it is stored.
@@ -642,7 +645,11 @@ fn step(world: &WorldRef, strings: &RefCell<StringTable>, sizes: &RefCell<ImageS
         let open = next.open != 0;
         let was = old.was_open != 0;
         if open && !was {
-            next.restore = state.focus;
+            next.restore = if state.focus != 0 {
+                state.focus
+            } else {
+                focus_before_update
+            };
             if next.flags & 8 != 0 {
                 let want = if next.focus != 0 {
                     next.focus
