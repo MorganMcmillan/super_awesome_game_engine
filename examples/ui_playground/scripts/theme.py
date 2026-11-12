@@ -81,6 +81,7 @@ class Theme:
         self.Body = make("Body", ui.Text, size(None, None))
         self.Muted = make("Muted", ui.Text, size(None, None))
         self.Para = make("Para", ui.Text, size(fill, None))
+        self.Rich = make("Rich", ui.RichText, size(fill, None))
         # Controls.
         for name in ("Primary", "Secondary", "Ghost", "Danger", "Swatch"):
             setattr(self, name, make(name, ui.Button, size(fill, None)))
@@ -89,7 +90,7 @@ class Theme:
         self.Switch = make("Switch", ui.Toggle)
         self.Track = make("Track", ui.Slider)
         self.Gauge = make("Gauge", ui.Meter)
-        self.Field = make("Field", ui.TextInput)
+        self.Field = make("Field", ui.TextInput, size(None, 14))
         self.accents = ACCENTS
         self.apply(ORANGE)
 
@@ -141,12 +142,17 @@ class Theme:
         paint(self.Track, BG2)
         paint(self.Gauge, BG2)
         paint(self.Field, BG0, EDGE, 1)
+        paint(self.Rich, 0, 0, 0)
 
         text(self.Title, TEXT, 2)
         text(self.Heading, accent)
         text(self.Body, TEXT)
         text(self.Muted, MUTED)
         text(self.Para, TEXT, wrap=1)
+        text(self.Rich, TEXT, wrap=1)
+        text(ui.H1, TEXT, 3)
+        text(ui.H2, accent, 2)
+        text(ui.H3, TEXT, 1)
         text(self.Chip, TEXT)
         text(self.Badge, INK)
         text(self.Primary, INK)

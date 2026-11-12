@@ -71,6 +71,16 @@ pub const NAV_END: u32 = 1 << 10;
 pub const NAV_DELETE: u32 = 1 << 11;
 pub const NAV_PAGE_UP: u32 = 1 << 12;
 pub const NAV_PAGE_DOWN: u32 = 1 << 13;
+/// Held while typing: extend the selection (Shift).
+pub const NAV_SHIFT: u32 = 1 << 14;
+/// Held while moving: by word, or to the start or end of the whole text (Ctrl).
+pub const NAV_WORD: u32 = 1 << 15;
+pub const NAV_SELECT_ALL: u32 = 1 << 16;
+pub const NAV_COPY: u32 = 1 << 17;
+pub const NAV_CUT: u32 = 1 << 18;
+pub const NAV_PASTE: u32 = 1 << 19;
+pub const NAV_UNDO: u32 = 1 << 20;
+pub const NAV_REDO: u32 = 1 << 21;
 
 /// One thing the UI module wants drawn. Colors are straight-alpha RGBA.
 #[derive(Clone, Debug, PartialEq)]

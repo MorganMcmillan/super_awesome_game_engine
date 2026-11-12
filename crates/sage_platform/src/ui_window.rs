@@ -13,8 +13,9 @@ use std::time::{Duration, Instant};
 use sage_assets::Image;
 use sage_core::TICK_DT;
 use sage_core::host::{
-    NAV_ACCEPT, NAV_BACKSPACE, NAV_CANCEL, NAV_DELETE, NAV_DOWN, NAV_END, NAV_HOME, NAV_LEFT,
-    NAV_NEXT, NAV_PAGE_DOWN, NAV_PAGE_UP, NAV_PREV, NAV_RIGHT, NAV_UP, UiFrame,
+    NAV_ACCEPT, NAV_BACKSPACE, NAV_CANCEL, NAV_COPY, NAV_CUT, NAV_DELETE, NAV_DOWN, NAV_END,
+    NAV_HOME, NAV_LEFT, NAV_NEXT, NAV_PAGE_DOWN, NAV_PAGE_UP, NAV_PASTE, NAV_PREV, NAV_REDO,
+    NAV_RIGHT, NAV_SELECT_ALL, NAV_SHIFT, NAV_UNDO, NAV_UP, NAV_WORD, UiFrame,
 };
 use sdl3::event::{Event, WindowEvent};
 use sdl3::keyboard::{KeyboardState, Keycode, Scancode};
@@ -39,6 +40,8 @@ pub struct UiTickInput {
     pub ch: Option<char>,
     /// Wheel notches since the last tick; positive scrolls content down.
     pub wheel: f32,
+    /// The system clipboard's text, read on the tick a paste is asked for.
+    pub paste: Option<String>,
 }
 
 /// What the window loop needs from a UI application.
@@ -53,6 +56,11 @@ pub trait UiApp {
     /// opens.
     fn images(&self) -> Vec<(u64, Image)> {
         vec![]
+    }
+    /// Text a copy or cut put on the clipboard since the last call; the window
+    /// publishes it to the system.
+    fn take_clipboard(&mut self) -> Option<String> {
+        None
     }
 }
 
@@ -105,6 +113,7 @@ impl NavSampler {
 fn keys_down(keys: &KeyboardState) -> Vec<(bool, u32, bool)> {
     let key = |s: Scancode| keys.is_scancode_pressed(s);
     let shift = key(Scancode::LShift) || key(Scancode::RShift);
+    let ctrl = key(Scancode::LCtrl) || key(Scancode::RCtrl);
     vec![
         (key(Scancode::Tab) && !shift, NAV_NEXT, true),
         (key(Scancode::Tab) && shift, NAV_PREV, true),
@@ -124,7 +133,31 @@ fn keys_down(keys: &KeyboardState) -> Vec<(bool, u32, bool)> {
         (key(Scancode::End), NAV_END, false),
         (key(Scancode::PageUp), NAV_PAGE_UP, true),
         (key(Scancode::PageDown), NAV_PAGE_DOWN, true),
+        (ctrl && key(Scancode::A), NAV_SELECT_ALL, false),
+        (ctrl && key(Scancode::C), NAV_COPY, false),
+        (ctrl && key(Scancode::X), NAV_CUT, false),
+        (ctrl && key(Scancode::V), NAV_PASTE, true),
+        (ctrl && !shift && key(Scancode::Z), NAV_UNDO, true),
+        (
+            ctrl && (key(Scancode::Y) || shift && key(Scancode::Z)),
+            NAV_REDO,
+            true,
+        ),
     ]
+}
+
+/// The modifier bits, held for as long as the keys are: Shift extends a
+/// selection, Ctrl moves by word.
+pub fn modifier_bits(keys: &KeyboardState) -> u32 {
+    let key = |s: Scancode| keys.is_scancode_pressed(s);
+    let mut bits = 0;
+    if key(Scancode::LShift) || key(Scancode::RShift) {
+        bits |= NAV_SHIFT;
+    }
+    if key(Scancode::LCtrl) || key(Scancode::RCtrl) {
+        bits |= NAV_WORD;
+    }
+    bits
 }
 
 /// What the window's events add up to between ticks: where the mouse is,
@@ -214,6 +247,7 @@ impl UiEvents {
             nav,
             ch: self.typed.pop_front(),
             wheel: std::mem::take(&mut self.wheel),
+            paste: None,
         }
     }
 }
@@ -235,6 +269,7 @@ pub fn run_ui_windowed<A: UiApp>(app: &mut A, options: &WindowOptions) -> Result
         gpu.register_ui_image(id, &image)?;
     }
     video.text_input().start(&window);
+    let clipboard = video.clipboard();
     let mut events = sdl.event_pump().map_err(|e| e.to_string())?;
 
     let tick_len = Duration::from_secs_f32(TICK_DT);
@@ -271,8 +306,16 @@ pub fn run_ui_windowed<A: UiApp>(app: &mut A, options: &WindowOptions) -> Result
                 ];
                 [(px[0] - origin[0]) / scale, (px[1] - origin[1]) / scale]
             };
-            let input = input_events.tick(nav.sample(&keys_down(&events.keyboard_state())), to_ui);
+            let keys = events.keyboard_state();
+            let bits = nav.sample(&keys_down(&keys)) | modifier_bits(&keys);
+            let mut input = input_events.tick(bits, to_ui);
+            if bits & NAV_PASTE != 0 {
+                input.paste = clipboard.clipboard_text().ok();
+            }
             app.tick(&input);
+            if let Some(text) = app.take_clipboard() {
+                let _ = clipboard.set_clipboard_text(&text);
+            }
             ticks += 1;
             accumulator -= tick_len;
         }

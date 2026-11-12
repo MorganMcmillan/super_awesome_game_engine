@@ -395,6 +395,11 @@ pub struct Node {
     pub scroll_offset: f32,
     /// Text input: the caret as a character index.
     pub caret: usize,
+    /// Text input: selection anchor, scroll, rules and undo history.
+    pub field: FieldNode,
+    /// Rich text: per-character styles and link targets (`text` is the plain
+    /// text). Links make the node hoverable and clickable.
+    pub rich: Option<crate::text::Rich>,
     /// Set by interaction, read by drawing.
     pub hovered: bool,
     pub pressed: bool,
@@ -456,6 +461,8 @@ impl Default for Node {
             scroll: false,
             scroll_offset: 0.0,
             caret: 0,
+            field: FieldNode::default(),
+            rich: None,
             hovered: false,
             pressed: false,
             focused: false,
@@ -576,6 +583,40 @@ impl Tree {
         }
         order.sort_by_key(|&(z, _)| z);
         order.into_iter().map(|(_, i)| i).collect()
+    }
+}
+
+/// Everything a text input keeps besides its text and caret. Mirrors the
+/// `TextField` and `History` components.
+#[derive(Clone, Debug, PartialEq)]
+pub struct FieldNode {
+    /// The other end of the selection (a character index).
+    pub anchor: usize,
+    /// First visible column (one line) or row (several lines).
+    pub view: usize,
+    /// The column vertical motion aims for; `usize::MAX` for none.
+    pub want: usize,
+    pub multiline: bool,
+    pub masked: bool,
+    pub numeric: bool,
+    pub max_len: usize,
+    pub placeholder: String,
+    pub hist: crate::text::History,
+}
+
+impl Default for FieldNode {
+    fn default() -> FieldNode {
+        FieldNode {
+            anchor: 0,
+            view: 0,
+            want: usize::MAX,
+            multiline: false,
+            masked: false,
+            numeric: false,
+            max_len: 256,
+            placeholder: String::new(),
+            hist: crate::text::History::default(),
+        }
     }
 }
 

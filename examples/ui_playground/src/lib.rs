@@ -13,7 +13,7 @@ use sage_ecs_py::Ecs;
 use sage_platform::sprite::{UiResources, compose_ui, rasterize};
 use sage_platform::ui_window::{UiApp, UiTickInput};
 use sage_script::Script;
-use sage_ui::ecs::{UiNav, UiPointer, UiScreen, UiTextEntry};
+use sage_ui::ecs::{UiClipboard, UiNav, UiPointer, UiScreen, UiTextEntry};
 
 pub const THEME: &str = include_str!("../scripts/theme.py");
 pub const SCRIPT: &str = include_str!("../scripts/playground.py");
@@ -23,6 +23,7 @@ pub const SCRIPT: &str = include_str!("../scripts/playground.py");
 pub const PAGES: &[(&str, &str)] = &[
     ("style", include_str!("../scripts/pages/style.py")),
     ("popups", include_str!("../scripts/pages/popups.py")),
+    ("text", include_str!("../scripts/pages/text.py")),
 ];
 
 pub mod assets;
@@ -42,6 +43,8 @@ pub struct Playground {
     script: Script,
     pages: Vec<Script>,
     pub world: World,
+    /// Text a copy put on the clipboard, until the window publishes it.
+    outbox: std::cell::RefCell<Option<String>>,
 }
 
 impl Playground {
@@ -71,6 +74,7 @@ impl Playground {
             script,
             pages,
             world,
+            outbox: Default::default(),
         };
         p.step();
         Ok(p)
@@ -146,10 +150,36 @@ impl Playground {
             wheel: i.wheel,
         });
         self.world.set(UiNav { bits: i.nav });
+        if let Some(text) = &i.paste {
+            let id = self.ecs.intern(text);
+            self.world.set(UiClipboard { text: id, out: 0 });
+        }
         self.world.set(UiTextEntry {
             ch: i.ch.map_or(0, |c| c as u32),
         });
         self.step();
+        let clip = self.world.get::<&UiClipboard>(|c| *c);
+        if clip.out != 0 {
+            let text = self
+                .ecs
+                .strings()
+                .borrow()
+                .get(clip.text)
+                .map(str::to_string);
+            *self.outbox.borrow_mut() = text;
+            self.world.set(UiClipboard { out: 0, ..clip });
+        }
+    }
+
+    /// The text on the UI's clipboard (what a paste would insert).
+    pub fn clipboard(&self) -> String {
+        let id = self.world.get::<&UiClipboard>(|c| c.text);
+        self.ecs
+            .strings()
+            .borrow()
+            .get(id)
+            .unwrap_or("")
+            .to_string()
     }
 
     pub fn hover(&self, p: [f32; 2]) {
@@ -269,6 +299,10 @@ impl UiApp for Playground {
 
     fn frame(&self) -> UiFrame {
         self.ui_frame()
+    }
+
+    fn take_clipboard(&mut self) -> Option<String> {
+        self.outbox.borrow_mut().take()
     }
 
     fn images(&self) -> Vec<(u64, Image)> {

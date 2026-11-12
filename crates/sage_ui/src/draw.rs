@@ -2,10 +2,11 @@
 //! data presentation consumes (`sage_core::host`). The UI itself never
 //! touches a renderer.
 
-use sage_core::host::{UI_ADVANCE, UI_GLYPH, UiDraw, UiFrame};
+use sage_core::host::{UI_ADVANCE, UI_GLYPH, UI_LINE_HEIGHT, UiDraw, UiFrame};
 
-use crate::layout::{Direction, Fit, ImageNode, Node, Rect, Tree, Widget, rgba};
+use crate::layout::{Direction, Fit, ImageNode, Node, Rect, Tree, Widget, chars_per_line, rgba};
 use crate::style::{faded, resolve};
+use crate::text::{locate, mask, rows};
 
 /// A rectangle cut off at `clip`.
 fn rect(out: &mut Vec<UiDraw>, r: Rect, color: [u8; 4], clip: Option<Rect>) {
@@ -258,7 +259,11 @@ fn node(out: &mut Vec<UiDraw>, n: &Node, fade: f32) {
     } else {
         n.clip
     };
-    if !n.lines.is_empty() {
+    if n.widget == Widget::TextInput {
+        text_field(out, n, c4(col.text), c4(n.accent), text_clip);
+    } else if n.rich.is_some() {
+        rich_text(out, n, &c4, text_clip);
+    } else if !n.lines.is_empty() {
         let color = c4(col.text);
         let visible = text_clip.is_none_or(|c| c.w > 0.0 && c.h > 0.0);
         if visible {
@@ -271,17 +276,186 @@ fn node(out: &mut Vec<UiDraw>, n: &Node, fade: f32) {
             });
         }
     }
-    if n.widget == Widget::TextInput && n.focused && n.enabled {
-        let caret = n.caret.min(n.text.chars().count()) as f32;
-        let s = n.text_scale;
-        let bar = Rect {
-            x: r.x + n.padding[0] + caret * UI_ADVANCE * s - (s / 2.0).floor(),
-            y: r.y + n.padding[1],
-            w: s.max(1.0),
-            h: UI_GLYPH[1] * s,
-        };
-        rect(out, bar, c4(col.text), text_clip);
+}
+
+/// Rich text: the wrapped rows drawn as runs of equal style. Code gets a
+/// tinted box, a link its accent color and an underline, bold is the glyphs
+/// drawn twice one unit apart (the only face is a bitmap).
+fn rich_text(out: &mut Vec<UiDraw>, n: &Node, c4: &dyn Fn(u32) -> [u8; 4], clip: Option<Rect>) {
+    let Some(rich) = &n.rich else { return };
+    let r = n.rect;
+    let s = n.text_scale;
+    let (adv, lh) = (UI_ADVANCE * s, UI_LINE_HEIGHT * s);
+    let (x0, y0) = (r.x + n.padding[0], r.y + n.padding[1]);
+    let base = n.shown.unwrap_or_else(|| resolve(n)).text;
+    let chars: Vec<char> = n.text.chars().collect();
+    let rs = rows(
+        &n.text,
+        chars_per_line(r.w - n.padding[0] - n.padding[2], s),
+        n.wrap,
+    );
+    for (row, rw) in rs.iter().enumerate() {
+        let y = y0 + row as f32 * lh;
+        // Runs of equal style within the row, ignoring the trailing break.
+        let mut k = rw.start;
+        while k < rw.end {
+            let st = rich.styles.get(k).copied().unwrap_or_default();
+            let mut e = k;
+            while e < rw.end && rich.styles.get(e).copied().unwrap_or_default() == st {
+                e += 1;
+            }
+            let text: String = chars[k..e].iter().collect();
+            let x = x0 + (k - rw.start) as f32 * adv;
+            let color = if st.color != 0 {
+                c4(st.color)
+            } else if st.link != 0 {
+                c4(n.accent)
+            } else {
+                c4(base)
+            };
+            if st.code {
+                let w = (e - k) as f32 * adv;
+                rect(
+                    out,
+                    Rect {
+                        x,
+                        y: y - s,
+                        w,
+                        h: UI_GLYPH[1] * s + 2.0 * s,
+                    },
+                    [255, 255, 255, 0x1E],
+                    clip,
+                );
+            }
+            let shown = text.trim_end().to_string();
+            if !shown.is_empty() {
+                for dx in if st.bold { vec![0.0, s] } else { vec![0.0] } {
+                    out.push(UiDraw::Text {
+                        pos: [x + dx, y],
+                        text: shown.clone(),
+                        scale: s,
+                        color,
+                        clip: clip4(clip),
+                    });
+                }
+            }
+            if st.link != 0 {
+                let w = shown.chars().count() as f32 * adv;
+                rect(
+                    out,
+                    Rect {
+                        x,
+                        y: y + UI_GLYPH[1] * s + s,
+                        w,
+                        h: s.max(1.0),
+                    },
+                    color,
+                    clip,
+                );
+            }
+            k = e;
+        }
     }
+}
+
+/// A text input: its text (masked for a password), a placeholder while it is
+/// empty, the selection, and the caret. One line scrolls sideways by its
+/// `view` columns, several lines wrap and scroll by rows.
+fn text_field(
+    out: &mut Vec<UiDraw>,
+    n: &Node,
+    color: [u8; 4],
+    accent: [u8; 4],
+    clip: Option<Rect>,
+) {
+    let r = n.rect;
+    let s = n.text_scale;
+    let (adv, lh) = (UI_ADVANCE * s, UI_LINE_HEIGHT * s);
+    let (x0, y0) = (r.x + n.padding[0], r.y + n.padding[1]);
+    let multi = n.field.multiline;
+    let shown = if n.field.masked {
+        mask(&n.text)
+    } else {
+        n.text.clone()
+    };
+    let cols = chars_per_line(r.w - n.padding[0] - n.padding[2], s);
+    let rs = rows(&shown, cols, multi);
+    let vis = (((r.h - n.padding[1] - n.padding[3]) / lh).floor() as usize).max(1);
+    // Where a character column of a row is drawn.
+    let (first_row, xview) = if multi {
+        (n.field.view, 0)
+    } else {
+        (0, n.field.view)
+    };
+    let at = |row: usize, col: usize| {
+        [
+            x0 + (col as f32 - xview as f32) * adv,
+            y0 + (row as f32 - first_row as f32) * lh,
+        ]
+    };
+    if n.text.is_empty() {
+        if !n.field.placeholder.is_empty() {
+            let mut dim = color;
+            dim[3] /= 2;
+            out.push(UiDraw::Text {
+                pos: [x0, y0],
+                text: n.field.placeholder.clone(),
+                scale: s,
+                color: dim,
+                clip: clip4(clip),
+            });
+        }
+    } else {
+        let last = if multi {
+            (first_row + vis).min(rs.len())
+        } else {
+            rs.len()
+        };
+        for (row, rw) in rs.iter().enumerate().take(last).skip(first_row) {
+            let line: String = shown
+                .chars()
+                .skip(rw.start)
+                .take(rw.end - rw.start)
+                .collect();
+            out.push(UiDraw::Text {
+                pos: at(row, 0),
+                text: line.trim_end_matches(['\n']).to_string(),
+                scale: s,
+                color,
+                clip: clip4(clip),
+            });
+        }
+    }
+    if !(n.focused && n.enabled) {
+        return;
+    }
+    let (lo, hi) = {
+        let len = n.text.chars().count();
+        let (a, c) = (n.field.anchor.min(len), n.caret.min(len));
+        (a.min(c), a.max(c))
+    };
+    if lo != hi {
+        let mut tint = accent;
+        tint[3] = 0x66;
+        for (row, rw) in rs.iter().enumerate() {
+            let (a, b) = (lo.max(rw.start), hi.min(rw.end));
+            if a >= b || (multi && (row < first_row || row >= first_row + vis)) {
+                continue;
+            }
+            let [x, y] = at(row, a - rw.start);
+            let w = (b - a) as f32 * adv;
+            rect(out, Rect { x, y, w, h: lh }, tint, clip);
+        }
+    }
+    let (row, col) = locate(&rs, n.caret.min(n.text.chars().count()));
+    let [x, y] = at(row, col);
+    let bar = Rect {
+        x: x - (s / 2.0).floor(),
+        y,
+        w: s.max(1.0),
+        h: UI_GLYPH[1] * s,
+    };
+    rect(out, bar, color, clip);
 }
 
 /// Draw commands back to front for the whole tree. A scroll container's

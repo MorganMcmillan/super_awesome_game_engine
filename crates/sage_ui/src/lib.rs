@@ -16,6 +16,7 @@ pub mod ecs;
 pub mod interact;
 pub mod layout;
 pub mod style;
+pub mod text;
 
 pub use draw::draw;
 pub use ecs::{ImageSizes, frame, register_image, setup};

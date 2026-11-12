@@ -45,6 +45,14 @@ class Clicked(Component):
     def __init__(self, target: u64 = ...) -> None: ...
 
 
+class Clipboard(Component):
+    """Native component `sage.ui.Clipboard`."""
+
+    text: u64
+    out: u32
+    def __init__(self, text: u64 = ..., out: u32 = ...) -> None: ...
+
+
 class Combo(Component):
     """Native component `sage.ui.Combo`."""
 
@@ -116,6 +124,39 @@ class Focused(Component):
 
     target: u64
     def __init__(self, target: u64 = ...) -> None: ...
+
+
+class History(Component):
+    """Native component `sage.ui.History`."""
+
+    last: u32
+    un: u32
+    rn: u32
+    u0: u64
+    uc0: u32
+    u1: u64
+    uc1: u32
+    u2: u64
+    uc2: u32
+    u3: u64
+    uc3: u32
+    u4: u64
+    uc4: u32
+    u5: u64
+    uc5: u32
+    r0: u64
+    rc0: u32
+    r1: u64
+    rc1: u32
+    r2: u64
+    rc2: u32
+    r3: u64
+    rc3: u32
+    r4: u64
+    rc4: u32
+    r5: u64
+    rc5: u32
+    def __init__(self, last: u32 = ..., un: u32 = ..., rn: u32 = ..., u0: u64 = ..., uc0: u32 = ..., u1: u64 = ..., uc1: u32 = ..., u2: u64 = ..., uc2: u32 = ..., u3: u64 = ..., uc3: u32 = ..., u4: u64 = ..., uc4: u32 = ..., u5: u64 = ..., uc5: u32 = ..., r0: u64 = ..., rc0: u32 = ..., r1: u64 = ..., rc1: u32 = ..., r2: u64 = ..., rc2: u32 = ..., r3: u64 = ..., rc3: u32 = ..., r4: u64 = ..., rc4: u32 = ..., r5: u64 = ..., rc5: u32 = ...) -> None: ...
 
 
 class Image(Component):
@@ -206,6 +247,14 @@ class Nav(Component):
     def __init__(self, bits: u32 = ...) -> None: ...
 
 
+class Navigate(Component):
+    """Native component `sage.ui.Navigate`."""
+
+    target: u64
+    link: u64
+    def __init__(self, target: u64 = ..., link: u64 = ...) -> None: ...
+
+
 class Option(Component):
     """Native component `sage.ui.Option`."""
 
@@ -243,6 +292,13 @@ class Rect(Component):
     w: f32
     h: f32
     def __init__(self, x: f32 = ..., y: f32 = ..., w: f32 = ..., h: f32 = ...) -> None: ...
+
+
+class Rich(Component):
+    """Native component `sage.ui.Rich`."""
+
+    markup: u64
+    def __init__(self, markup: u64 = ...) -> None: ...
 
 
 class Screen(Component):
@@ -350,6 +406,18 @@ class TextEntry(Component):
 
     ch: u32
     def __init__(self, ch: u32 = ...) -> None: ...
+
+
+class TextField(Component):
+    """Native component `sage.ui.TextField`."""
+
+    flags: u32
+    max_len: u32
+    placeholder: u64
+    anchor: u32
+    view: u32
+    want: u32
+    def __init__(self, flags: u32 = ..., max_len: u32 = ..., placeholder: u64 = ..., anchor: u32 = ..., view: u32 = ..., want: u32 = ...) -> None: ...
 
 
 class TextStyle(Component):

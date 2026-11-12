@@ -8,13 +8,17 @@
 //! from the existing `sage-input v1` recording. The pointer is not part of
 //! that format yet (see docs/milestone-2.md).
 
-use sage_core::host::UI_ADVANCE;
+use sage_core::host::{UI_ADVANCE, UI_LINE_HEIGHT};
 
-use crate::layout::{Direction, Tree, Widget};
+use crate::layout::{Direction, Node, Tree, Widget, chars_per_line};
+use crate::text::{
+    Field, Kind, Row, Rules, format_number, index_at, locate, parse_number, rows, snap,
+};
 
 pub use sage_core::host::{
-    NAV_ACCEPT, NAV_BACKSPACE, NAV_CANCEL, NAV_DELETE, NAV_DOWN, NAV_END, NAV_HOME, NAV_LEFT,
-    NAV_NEXT, NAV_PAGE_DOWN, NAV_PAGE_UP, NAV_PREV, NAV_RIGHT, NAV_UP,
+    NAV_ACCEPT, NAV_BACKSPACE, NAV_CANCEL, NAV_COPY, NAV_CUT, NAV_DELETE, NAV_DOWN, NAV_END,
+    NAV_HOME, NAV_LEFT, NAV_NEXT, NAV_PAGE_DOWN, NAV_PAGE_UP, NAV_PASTE, NAV_PREV, NAV_REDO,
+    NAV_RIGHT, NAV_SELECT_ALL, NAV_SHIFT, NAV_UNDO, NAV_UP, NAV_WORD,
 };
 
 /// The longest text a text input accepts, in characters.
@@ -52,6 +56,8 @@ pub struct UiInput {
     /// Wheel notches this tick; positive scrolls the content down (towards
     /// its end).
     pub wheel: f32,
+    /// The clipboard's text, when the host has it ready (for a paste).
+    pub paste: Option<String>,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -67,6 +73,10 @@ pub enum EventKind {
     /// A secondary press over a node that provides a context menu, at this
     /// position.
     ContextRequested(f32, f32),
+    /// A link in rich text was clicked: its target.
+    Navigate(String),
+    /// A copy or cut: this text goes on the clipboard.
+    Copied(String),
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -93,10 +103,6 @@ pub fn hit_test(tree: &Tree, order: &[usize], p: [f32; 2]) -> Option<usize> {
 
 fn char_len(s: &str) -> usize {
     s.chars().count()
-}
-
-fn byte_of(s: &str, index: usize) -> usize {
-    s.char_indices().nth(index).map_or(s.len(), |(b, _)| b)
 }
 
 /// The length of a scroll container's visible content area along its flow.
@@ -323,11 +329,260 @@ fn activate(tree: &mut Tree, i: usize, events: &mut Vec<UiEvent>) {
                 kind: EventKind::Toggled(on),
             });
         }
-        Widget::TextInput => events.push(UiEvent {
-            target: id,
-            kind: EventKind::Submitted,
-        }),
+        Widget::TextInput if !tree.nodes[i].field.multiline => {
+            if tree.nodes[i].field.numeric && commit_number(&mut tree.nodes[i]) {
+                events.push(UiEvent {
+                    target: id,
+                    kind: EventKind::Changed(tree.nodes[i].value),
+                });
+            }
+            events.push(UiEvent {
+                target: id,
+                kind: EventKind::Submitted,
+            });
+        }
         _ => {}
+    }
+}
+
+/// Which link of a rich-text node is under the point `p` (1 + its index).
+fn link_at(n: &Node, p: [f32; 2]) -> Option<usize> {
+    let rich = n.rich.as_ref().filter(|r| !r.links.is_empty())?;
+    let (adv, lh) = (UI_ADVANCE * n.text_scale, UI_LINE_HEIGHT * n.text_scale);
+    let (x0, y0) = (n.rect.x + n.padding[0], n.rect.y + n.padding[1]);
+    let rs = rows(&n.text, content_cols(n), n.wrap);
+    let row = ((p[1] - y0) / lh).floor();
+    let col = ((p[0] - x0) / adv).floor();
+    if row < 0.0 || col < 0.0 {
+        return None;
+    }
+    let r = rs.get(row as usize)?;
+    let at = r.start + col as usize;
+    (at < r.end)
+        .then(|| rich.styles.get(at))
+        .flatten()
+        .map(|s| s.link as usize)
+        .filter(|&l| l > 0)
+}
+
+fn content_cols(n: &Node) -> usize {
+    chars_per_line(n.rect.w - n.padding[0] - n.padding[2], n.text_scale)
+}
+
+/// The rows a text area shows (one row for a single-line field).
+fn field_rows(n: &Node) -> Vec<Row> {
+    rows(&n.text, content_cols(n), n.field.multiline)
+}
+
+fn visible_rows(n: &Node) -> usize {
+    let h = n.rect.h - n.padding[1] - n.padding[3];
+    ((h / (UI_LINE_HEIGHT * n.text_scale)).floor() as usize).max(1)
+}
+
+/// The character index under the point `p` of a text input.
+fn index_at_point(n: &Node, p: [f32; 2]) -> usize {
+    let adv = UI_ADVANCE * n.text_scale;
+    let col = ((p[0] - (n.rect.x + n.padding[0])) / adv).round().max(0.0) as usize;
+    if n.field.multiline {
+        let row = ((p[1] - (n.rect.y + n.padding[1])) / (UI_LINE_HEIGHT * n.text_scale))
+            .floor()
+            .max(0.0) as usize
+            + n.field.view;
+        index_at(&field_rows(n), row, col)
+    } else {
+        (col + n.field.view).min(char_len(&n.text))
+    }
+}
+
+/// Scrolls a text input so that its caret is visible.
+fn scroll_into_view(n: &mut Node) {
+    if n.field.multiline {
+        let (row, _) = locate(&field_rows(n), n.caret);
+        let vis = visible_rows(n);
+        if row < n.field.view {
+            n.field.view = row;
+        } else if row >= n.field.view + vis {
+            n.field.view = row + 1 - vis;
+        }
+    } else {
+        let cols = content_cols(n);
+        if n.caret < n.field.view {
+            n.field.view = n.caret;
+        } else if n.caret >= n.field.view + cols {
+            n.field.view = n.caret + 1 - cols;
+        }
+        if char_len(&n.text) < cols {
+            n.field.view = 0;
+        }
+    }
+}
+
+fn decimals_of(step: f32) -> usize {
+    let mut d = 0;
+    let mut s = step.abs() as f64;
+    while d < 6 && (s - s.round()).abs() > 1e-6 {
+        s *= 10.0;
+        d += 1;
+    }
+    d.max(if step == 0.0 { 3 } else { 0 })
+}
+
+/// Reads a number field's text into its value: parsed, snapped to its step
+/// and range, and written back in canonical form. Text that is not a number
+/// goes back to the value. Returns whether the value changed.
+fn commit_number(n: &mut Node) -> bool {
+    let before = n.value;
+    if let Some(v) = parse_number(&n.text) {
+        n.value = snap(v, n.min as f64, n.max as f64, n.step as f64) as f32;
+    }
+    n.text = format_number(n.value as f64, decimals_of(n.step));
+    n.caret = n.caret.min(char_len(&n.text));
+    n.field.anchor = n.caret;
+    n.value != before
+}
+
+/// Steps a number field by `dir` steps (one unit without a step).
+fn step_number(n: &mut Node, dir: f64) -> bool {
+    let before = n.value;
+    let cur = parse_number(&n.text).unwrap_or(n.value as f64);
+    let step = if n.step > 0.0 { n.step as f64 } else { 1.0 };
+    n.value = snap(cur + dir * step, n.min as f64, n.max as f64, n.step as f64) as f32;
+    n.text = format_number(n.value as f64, decimals_of(n.step));
+    n.caret = char_len(&n.text);
+    n.field.anchor = n.caret;
+    n.value != before
+}
+
+/// Keyboard editing of the focused text input (design doc 9.5, F4).
+fn edit_text(n: &mut Node, input: &UiInput, edge: u32, events: &mut Vec<UiEvent>) {
+    let id = n.id;
+    let rules = Rules {
+        max_len: n.field.max_len,
+        multiline: n.field.multiline,
+        numeric: n.field.numeric,
+    };
+    let mut f = Field {
+        text: std::mem::take(&mut n.text),
+        caret: n.caret,
+        anchor: n.field.anchor,
+    };
+    f.caret = f.caret.min(f.len());
+    f.anchor = f.anchor.min(f.len());
+    let mut hist = std::mem::take(&mut n.field.hist);
+    let shift = input.nav & NAV_SHIFT != 0;
+    let word = input.nav & NAV_WORD != 0;
+    let mut changed = false;
+    let mut vertical = false;
+    let mut stepped = false;
+    if edge & NAV_LEFT != 0 {
+        f.step(-1, word, shift);
+    }
+    if edge & NAV_RIGHT != 0 {
+        f.step(1, word, shift);
+    }
+    if edge & NAV_HOME != 0 {
+        f.home_end(false, word || !rules.multiline, shift);
+    }
+    if edge & NAV_END != 0 {
+        f.home_end(true, word || !rules.multiline, shift);
+    }
+    if rules.multiline {
+        n.text = f.text.clone();
+        let rs = field_rows(n);
+        let vis = visible_rows(n);
+        let want = (n.field.want != usize::MAX).then_some(n.field.want);
+        let mut aim = want;
+        for (bit, dir, by) in [
+            (NAV_UP, -1, 1),
+            (NAV_DOWN, 1, 1),
+            (NAV_PAGE_UP, -1, vis),
+            (NAV_PAGE_DOWN, 1, vis),
+        ] {
+            if edge & bit != 0 {
+                for _ in 0..by {
+                    aim = Some(f.vertical(dir, &rs, aim, shift));
+                }
+                vertical = true;
+            }
+        }
+        if vertical {
+            n.field.want = aim.unwrap_or(usize::MAX);
+        }
+    } else if n.field.numeric {
+        for (bit, dir) in [(NAV_UP, 1.0), (NAV_DOWN, -1.0)] {
+            if edge & bit != 0 {
+                n.text = f.text.clone();
+                stepped |= step_number(n, dir);
+                f = Field {
+                    text: std::mem::take(&mut n.text),
+                    caret: n.caret,
+                    anchor: n.field.anchor,
+                };
+            }
+        }
+    }
+    if !vertical {
+        n.field.want = usize::MAX;
+    }
+    if edge & NAV_BACKSPACE != 0 {
+        changed |= f.delete(false, word, &mut hist);
+    }
+    if edge & NAV_DELETE != 0 {
+        changed |= f.delete(true, word, &mut hist);
+    }
+    if edge & NAV_SELECT_ALL != 0 {
+        f.select_all();
+    }
+    if edge & NAV_COPY != 0 && !n.field.masked && f.has_selection() {
+        events.push(UiEvent {
+            target: id,
+            kind: EventKind::Copied(f.selected().to_string()),
+        });
+    }
+    if edge & NAV_CUT != 0
+        && !n.field.masked
+        && f.has_selection()
+        && let Some(s) = f.cut(&mut hist)
+    {
+        events.push(UiEvent {
+            target: id,
+            kind: EventKind::Copied(s),
+        });
+        changed = true;
+    }
+    if edge & NAV_PASTE != 0
+        && let Some(s) = &input.paste
+    {
+        changed |= f.insert(s, &rules, &mut hist, Kind::Other);
+    }
+    if edge & NAV_UNDO != 0 {
+        changed |= f.undo(&mut hist);
+    }
+    if edge & NAV_REDO != 0 {
+        changed |= f.redo(&mut hist);
+    }
+    if let Some(c) = input.ch {
+        changed |= f.insert(&c.to_string(), &rules, &mut hist, Kind::Typing);
+    }
+    if edge & NAV_ACCEPT != 0 && rules.multiline {
+        changed |= f.insert("\n", &rules, &mut hist, Kind::Other);
+    }
+    n.text = f.text;
+    n.caret = f.caret;
+    n.field.anchor = f.anchor;
+    n.field.hist = hist;
+    scroll_into_view(n);
+    if changed {
+        events.push(UiEvent {
+            target: id,
+            kind: EventKind::TextChanged,
+        });
+    }
+    if stepped {
+        events.push(UiEvent {
+            target: id,
+            kind: EventKind::Changed(n.value),
+        });
     }
 }
 
@@ -373,8 +628,12 @@ pub fn update(tree: &mut Tree, st: &mut UiState, input: &UiInput) -> Vec<UiEvent
                     && let Some(p) = input.pointer
                 {
                     let n = &mut tree.nodes[i];
-                    let col = (p[0] - (n.rect.x + n.padding[0])) / (UI_ADVANCE * n.text_scale);
-                    n.caret = (col.round().max(0.0) as usize).min(char_len(&n.text));
+                    n.caret = index_at_point(n, p);
+                    if input.nav & NAV_SHIFT == 0 {
+                        n.field.anchor = n.caret;
+                    }
+                    n.field.want = usize::MAX;
+                    scroll_into_view(n);
                 }
                 if tree.nodes[i].widget.focusable() && st.focus != st.active {
                     st.focus = st.active;
@@ -396,6 +655,27 @@ pub fn update(tree: &mut Tree, st: &mut UiState, input: &UiInput) -> Vec<UiEvent
             target: tree.nodes[i].id,
             kind: EventKind::Changed(tree.nodes[i].value),
         });
+    }
+    // A click on a link in rich text.
+    if release
+        && let (Some(p), Some(i)) = (input.pointer, find(tree, st.hot))
+        && let Some(l) = link_at(&tree.nodes[i], p)
+    {
+        let target = tree.nodes[i].rich.as_ref().unwrap().links[l - 1].clone();
+        events.push(UiEvent {
+            target: tree.nodes[i].id,
+            kind: EventKind::Navigate(target),
+        });
+    }
+    // Dragging inside a text input extends the selection.
+    if let (Some(p), Some(i)) = (input.pointer, find(tree, st.active))
+        && input.down
+        && !press
+        && tree.nodes[i].widget == Widget::TextInput
+    {
+        let n = &mut tree.nodes[i];
+        n.caret = index_at_point(n, p);
+        scroll_into_view(n);
     }
     if release {
         if let Some(i) = find(tree, st.active)
@@ -467,6 +747,23 @@ pub fn update(tree: &mut Tree, st: &mut UiState, input: &UiInput) -> Vec<UiEvent
         })
     };
     if input.wheel != 0.0
+        && let Some(i) = find(tree, st.hot).filter(|&i| tree.nodes[i].widget == Widget::TextInput)
+    {
+        let n = &mut tree.nodes[i];
+        if n.field.multiline {
+            let (vis, total) = (visible_rows(n), field_rows(n).len());
+            let max = total.saturating_sub(vis) as f32;
+            n.field.view = (n.field.view as f32 + input.wheel * 3.0).clamp(0.0, max) as usize;
+        } else if n.field.numeric && n.id == st.focus {
+            let dir = if input.wheel > 0.0 { -1.0 } else { 1.0 };
+            if step_number(n, dir) {
+                events.push(UiEvent {
+                    target: n.id,
+                    kind: EventKind::Changed(n.value),
+                });
+            }
+        }
+    } else if input.wheel != 0.0
         && let Some(i) = container_under(tree)
     {
         st.scrolled |= scroll_by(tree, i, input.wheel * SCROLL_STEP);
@@ -486,9 +783,19 @@ pub fn update(tree: &mut Tree, st: &mut UiState, input: &UiInput) -> Vec<UiEvent
 
     // Navigation acts on the edge of a bit (pressed this tick, not held).
     let edge = input.nav & !st.prev_nav;
+    // A text area and a number field keep Up and Down for themselves.
+    let keeps_vertical = find(tree, st.focus).is_some_and(|f| {
+        let n = &tree.nodes[f];
+        n.widget == Widget::TextInput && (n.field.multiline || n.field.numeric)
+    });
+    let (down_bit, up_bit) = if keeps_vertical {
+        (0, 0)
+    } else {
+        (NAV_DOWN, NAV_UP)
+    };
     let moves = [
-        (edge & (NAV_NEXT | NAV_DOWN) != 0, true),
-        (edge & (NAV_PREV | NAV_UP) != 0, false),
+        (edge & (NAV_NEXT | down_bit) != 0, true),
+        (edge & (NAV_PREV | up_bit) != 0, false),
     ];
     for (wanted, forward) in moves {
         if !wanted {
@@ -527,52 +834,23 @@ pub fn update(tree: &mut Tree, st: &mut UiState, input: &UiInput) -> Vec<UiEvent
             }
         }
         if tree.nodes[i].widget == Widget::TextInput {
-            let n = &mut tree.nodes[i];
-            let len = char_len(&n.text);
-            n.caret = n.caret.min(len);
-            if edge & NAV_LEFT != 0 && n.caret > 0 {
-                n.caret -= 1;
-            }
-            if edge & NAV_RIGHT != 0 && n.caret < len {
-                n.caret += 1;
-            }
-            if edge & NAV_HOME != 0 {
-                n.caret = 0;
-            }
-            if edge & NAV_END != 0 {
-                n.caret = len;
-            }
-            let mut changed = false;
-            if edge & NAV_BACKSPACE != 0 && n.caret > 0 {
-                let at = byte_of(&n.text, n.caret - 1);
-                n.text.remove(at);
-                n.caret -= 1;
-                changed = true;
-            }
-            if edge & NAV_DELETE != 0 && n.caret < char_len(&n.text) {
-                let at = byte_of(&n.text, n.caret);
-                n.text.remove(at);
-                changed = true;
-            }
-            if let Some(c) = input.ch
-                && !c.is_control()
-                && char_len(&n.text) < MAX_TEXT
-            {
-                let at = byte_of(&n.text, n.caret);
-                n.text.insert(at, c);
-                n.caret += 1;
-                changed = true;
-            }
-            if changed {
-                events.push(UiEvent {
-                    target: id,
-                    kind: EventKind::TextChanged,
-                });
-            }
+            edit_text(&mut tree.nodes[i], input, edge, &mut events);
         }
     }
     if edge & NAV_CANCEL != 0 && !escaped_a_layer {
         st.focus = 0;
+    }
+    // A number field settles when it loses focus.
+    if st.focus != focus_before
+        && let Some(i) = find(tree, focus_before)
+        && tree.nodes[i].widget == Widget::TextInput
+        && tree.nodes[i].field.numeric
+        && commit_number(&mut tree.nodes[i])
+    {
+        events.push(UiEvent {
+            target: focus_before,
+            kind: EventKind::Changed(tree.nodes[i].value),
+        });
     }
     // A widget focused by navigation scrolls into view.
     if st.focus != focus_before
@@ -1278,5 +1556,187 @@ mod tests {
         // The first focusable inside a subtree is found for autofocus.
         let t = menu_with_popup();
         assert_eq!(first_focusable(&t, 0), 10);
+    }
+
+    fn field_tree(text: &str, multiline: bool) -> Tree {
+        let mut t = Tree {
+            nodes: vec![Node {
+                id: 7,
+                width: Size::Fixed(60.0),
+                height: Size::Fixed(if multiline { 40.0 } else { 12.0 }),
+                padding: [3.0, 2.0, 3.0, 2.0],
+                widget: Widget::TextInput,
+                text: text.into(),
+                ..Node::default()
+            }],
+        };
+        t.nodes[0].field.multiline = multiline;
+        layout(&mut t, [100.0, 100.0]);
+        t
+    }
+
+    /// Focuses the field, then runs one tick per entry: held bits, then an
+    /// idle tick, so each is one edge.
+    fn keys(t: &mut Tree, st: &mut UiState, steps: &[(u32, Option<char>)]) -> Vec<UiEvent> {
+        tick(t, st, &pointer(4.0, 4.0, true));
+        tick(t, st, &pointer(4.0, 4.0, false));
+        let mut all = vec![];
+        for &(bits, ch) in steps {
+            all.extend(tick(
+                t,
+                st,
+                &UiInput {
+                    nav: bits,
+                    ch,
+                    ..UiInput::default()
+                },
+            ));
+            tick(t, st, &UiInput::default());
+        }
+        all
+    }
+
+    #[test]
+    fn shift_extends_a_selection_that_typing_replaces_and_ctrl_moves_by_word() {
+        let mut t = field_tree("one two", false);
+        let mut st = UiState::default();
+        keys(&mut t, &mut st, &[(NAV_END, None)]);
+        keys_noclick(&mut t, &mut st, NAV_LEFT | NAV_WORD | NAV_SHIFT, None);
+        assert_eq!((t.nodes[0].caret, t.nodes[0].field.anchor), (4, 7));
+        keys_noclick(&mut t, &mut st, 0, Some('X'));
+        assert_eq!((t.nodes[0].text.as_str(), t.nodes[0].caret), ("one X", 5));
+        assert_eq!(t.nodes[0].field.anchor, 5, "the selection is gone");
+    }
+
+    #[test]
+    fn a_drag_selects_and_select_all_copy_cut_paste_undo_work() {
+        let mut t = field_tree("hello world", false);
+        let mut st = UiState::default();
+        // Press at column 0, drag to column 5.
+        tick(&mut t, &mut st, &pointer(3.0, 4.0, true));
+        tick(&mut t, &mut st, &pointer(3.0 + 6.0 * 5.0, 4.0, true));
+        tick(&mut t, &mut st, &pointer(3.0 + 6.0 * 5.0, 4.0, false));
+        assert_eq!((t.nodes[0].field.anchor, t.nodes[0].caret), (0, 5));
+        let ev = keys_noclick(&mut t, &mut st, NAV_COPY, None);
+        assert_eq!(ev, vec![EventKind::Copied("hello".into())]);
+        let ev = keys_noclick(&mut t, &mut st, NAV_CUT, None);
+        assert_eq!(
+            ev,
+            vec![EventKind::Copied("hello".into()), EventKind::TextChanged]
+        );
+        assert_eq!(t.nodes[0].text, " world");
+        keys_noclick(&mut t, &mut st, NAV_END, None);
+        let paste = UiInput {
+            nav: NAV_PASTE,
+            paste: Some("!\n?".into()),
+            ..UiInput::default()
+        };
+        tick(&mut t, &mut st, &paste);
+        tick(&mut t, &mut st, &UiInput::default());
+        assert_eq!(
+            t.nodes[0].text, " world!?",
+            "a line field drops the newline"
+        );
+        keys_noclick(&mut t, &mut st, NAV_UNDO, None);
+        assert_eq!(t.nodes[0].text, " world");
+        keys_noclick(&mut t, &mut st, NAV_UNDO, None);
+        assert_eq!(t.nodes[0].text, "hello world");
+        keys_noclick(&mut t, &mut st, NAV_REDO, None);
+        assert_eq!(t.nodes[0].text, " world");
+        keys_noclick(&mut t, &mut st, NAV_SELECT_ALL, None);
+        assert_eq!((t.nodes[0].field.anchor, t.nodes[0].caret), (0, 6));
+    }
+
+    fn keys_noclick(t: &mut Tree, st: &mut UiState, bits: u32, ch: Option<char>) -> Vec<EventKind> {
+        let e = tick(
+            t,
+            st,
+            &UiInput {
+                nav: bits,
+                ch,
+                ..UiInput::default()
+            },
+        );
+        tick(t, st, &UiInput::default());
+        e.into_iter().map(|e| e.kind).collect()
+    }
+
+    #[test]
+    fn a_password_field_will_not_copy_or_cut() {
+        let mut t = field_tree("secret", false);
+        t.nodes[0].field.masked = true;
+        let mut st = UiState::default();
+        keys(&mut t, &mut st, &[(NAV_SELECT_ALL, None)]);
+        assert!(keys_noclick(&mut t, &mut st, NAV_COPY, None).is_empty());
+        assert!(keys_noclick(&mut t, &mut st, NAV_CUT, None).is_empty());
+        assert_eq!(t.nodes[0].text, "secret");
+    }
+
+    #[test]
+    fn a_long_line_scrolls_sideways_to_keep_the_caret_visible() {
+        let mut t = field_tree("0123456789abcdefghij", false);
+        let mut st = UiState::default();
+        keys(&mut t, &mut st, &[(NAV_END, None)]);
+        // 60 wide, 3 padding each side: 9 columns fit.
+        assert_eq!(t.nodes[0].field.view, 20 + 1 - 9);
+        keys_noclick(&mut t, &mut st, NAV_HOME, None);
+        assert_eq!(t.nodes[0].field.view, 0);
+    }
+
+    #[test]
+    fn a_text_area_takes_enter_up_down_and_wraps() {
+        let mut t = field_tree("ab cd ef gh", true);
+        let mut st = UiState::default();
+        keys(&mut t, &mut st, &[(NAV_END, None)]);
+        // 9 columns: "ab cd ef " / "gh".
+        keys_noclick(&mut t, &mut st, NAV_UP, None);
+        assert!(
+            t.nodes[0].caret < 9,
+            "Up moved within the field, not focus: {}",
+            t.nodes[0].caret
+        );
+        assert_eq!(st.focus, 7, "focus stayed");
+        keys_noclick(&mut t, &mut st, NAV_END, None);
+        let ev = keys_noclick(&mut t, &mut st, NAV_ACCEPT, None);
+        assert!(ev.contains(&EventKind::TextChanged) && !ev.contains(&EventKind::Submitted));
+        assert!(t.nodes[0].text.contains('\n'));
+        keys_noclick(&mut t, &mut st, 0, Some('z'));
+        assert!(t.nodes[0].text.ends_with("\nz") || t.nodes[0].text.contains("\nz"));
+    }
+
+    #[test]
+    fn a_number_field_settles_on_enter_steps_with_arrows_and_clamps() {
+        let mut t = field_tree("", false);
+        t.nodes[0].field.numeric = true;
+        t.nodes[0].min = 0.0;
+        t.nodes[0].max = 10.0;
+        t.nodes[0].step = 0.5;
+        let mut st = UiState::default();
+        keys(
+            &mut t,
+            &mut st,
+            &[
+                (0, Some('7')),
+                (0, Some('.')),
+                (0, Some('3')),
+                (0, Some('x')),
+            ],
+        );
+        assert_eq!(t.nodes[0].text, "7.3", "letters are refused");
+        let ev = keys_noclick(&mut t, &mut st, NAV_ACCEPT, None);
+        assert_eq!((t.nodes[0].text.as_str(), t.nodes[0].value), ("7.5", 7.5));
+        assert!(ev.contains(&EventKind::Changed(7.5)) && ev.contains(&EventKind::Submitted));
+        keys_noclick(&mut t, &mut st, NAV_UP, None);
+        assert_eq!(t.nodes[0].value, 8.0);
+        for _ in 0..8 {
+            keys_noclick(&mut t, &mut st, NAV_UP, None);
+        }
+        assert_eq!((t.nodes[0].value, t.nodes[0].text.as_str()), (10.0, "10"));
+        assert_eq!(st.focus, 7, "Up and Down stayed in the field");
+        // Garbage goes back to the value on blur.
+        keys_noclick(&mut t, &mut st, NAV_SELECT_ALL, None);
+        keys_noclick(&mut t, &mut st, 0, Some('-'));
+        tick(&mut t, &mut st, &pointer(90.0, 90.0, true));
+        assert_eq!(t.nodes[0].text, "10");
     }
 }

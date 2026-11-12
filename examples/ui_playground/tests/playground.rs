@@ -1,6 +1,10 @@
 use sage_core::StateHasher;
-use sage_core::host::{NAV_END, NAV_NEXT, NAV_PAGE_DOWN, UiDraw};
+use sage_core::host::{
+    NAV_ACCEPT, NAV_COPY, NAV_CUT, NAV_END, NAV_HOME, NAV_LEFT, NAV_NEXT, NAV_PAGE_DOWN, NAV_PASTE,
+    NAV_REDO, NAV_SELECT_ALL, NAV_SHIFT, NAV_UNDO, NAV_UP, NAV_WORD, UiDraw,
+};
 use sage_ecs_py::Policy;
+use sage_platform::ui_window::UiTickInput;
 use ui_playground::{Playground, SCREEN};
 
 const SCALE: u32 = 2;
@@ -788,4 +792,220 @@ fn the_confirm_dialog_returns_focus_to_its_button_and_escape_cancels() {
     p.idle(2);
     assert_eq!(p.text("confirm_said"), "ANSWER: YES");
     assert!(!p.eval::<bool>("ui.is_open(confirm_back)"));
+}
+
+// -- the text page --------------------------------------------------------------
+
+fn texty() -> Playground {
+    let p = Playground::new().unwrap();
+    p.show_page("TEXT");
+    p
+}
+
+fn hold(p: &Playground, bits: u32) {
+    p.press(bits);
+}
+
+#[test]
+fn a_field_shows_its_placeholder_until_typed_in_and_counts_what_is_typed() {
+    let p = texty();
+    assert!(texts(&p).contains(&"NAME OR EMAIL".to_string()));
+    p.click("email_field");
+    p.type_text("ada");
+    assert!(!texts(&p).contains(&"NAME OR EMAIL".to_string()));
+    assert_eq!(p.text("email_said"), "LENGTH: 3");
+    // The limit is 40 characters.
+    p.type_text(&"x".repeat(60));
+    assert_eq!(p.text("email_said"), "LENGTH: 40");
+}
+
+#[test]
+fn selection_replaces_and_the_clipboard_round_trips_to_the_window() {
+    let p = texty();
+    p.click("email_field");
+    p.type_text("hello world");
+    hold(&p, NAV_LEFT | NAV_WORD | NAV_SHIFT);
+    hold(&p, NAV_COPY);
+    assert_eq!(p.clipboard(), "world");
+    hold(&p, NAV_CUT);
+    assert_eq!(p.text("email_field"), "hello ");
+    hold(&p, NAV_HOME);
+    p.input(&UiTickInput {
+        nav: NAV_PASTE,
+        paste: Some("big ".into()),
+        ..UiTickInput::default()
+    });
+    p.idle(1);
+    assert_eq!(p.text("email_field"), "big hello ");
+    // Undo twice: the paste, then the cut.
+    hold(&p, NAV_UNDO);
+    hold(&p, NAV_UNDO);
+    assert_eq!(p.text("email_field"), "hello world");
+    hold(&p, NAV_REDO);
+    assert_eq!(p.text("email_field"), "hello ");
+    // Select all and type: it replaces everything.
+    hold(&p, NAV_SELECT_ALL);
+    p.type_text("Z");
+    assert_eq!(p.text("email_field"), "Z");
+}
+
+#[test]
+fn dragging_the_mouse_selects_text() {
+    let p = texty();
+    p.click("short_field");
+    hold(&p, NAV_HOME);
+    let [x, y, _, h] = p.rect("short_field");
+    let (left, row) = (x + 3.0, y + h / 2.0);
+    for (at, down) in [
+        (left + 1.0, true),
+        (left + 6.0 * 4.0, true),
+        (left + 6.0 * 4.0, false),
+    ] {
+        p.input(&UiTickInput {
+            pointer: Some([at, row]),
+            down,
+            ..UiTickInput::default()
+        });
+    }
+    hold(&p, NAV_COPY);
+    assert_eq!(p.clipboard(), "ABCD");
+}
+
+#[test]
+fn a_password_shows_asterisks_and_will_not_copy() {
+    let p = texty();
+    p.click("password_field");
+    p.type_text("hunter2");
+    assert_eq!(p.text("password_said"), "TYPED: 7");
+    let t = texts(&p);
+    assert!(t.contains(&"*******".to_string()), "masked: {t:?}");
+    assert!(!t.contains(&"hunter2".to_string()));
+    hold(&p, NAV_SELECT_ALL);
+    p.input(&UiTickInput {
+        nav: NAV_COPY,
+        ..UiTickInput::default()
+    });
+    assert_ne!(p.clipboard(), "hunter2");
+}
+
+#[test]
+fn a_text_area_wraps_takes_enter_and_moves_by_row() {
+    let p = texty();
+    let rows_of = |p: &Playground| {
+        p.ui_frame()
+            .draws
+            .iter()
+            .filter(|d| matches!(d, UiDraw::Text { text, .. } if text.len() > 6 && !text.contains(':') && text.chars().all(|c| c.is_uppercase() || c == ' ' || c == '.')))
+            .count()
+    };
+    assert!(rows_of(&p) >= 4, "the long first line wraps into rows");
+    p.click("notes_area");
+    hold(&p, NAV_SELECT_ALL);
+    p.type_text("a");
+    hold(&p, NAV_ACCEPT);
+    p.type_text("b");
+    assert_eq!(p.text("notes_area"), "a\nb");
+    assert_eq!(p.text("area_said"), "LINES: 2");
+    hold(&p, NAV_UP);
+    p.type_text("X");
+    assert_eq!(
+        p.text("notes_area"),
+        "aX\nb",
+        "Up moved to the first row, not to another widget"
+    );
+}
+
+#[test]
+fn number_fields_clamp_snap_step_and_report() {
+    let p = texty();
+    p.click("count_field");
+    hold(&p, NAV_SELECT_ALL);
+    p.type_text("42x");
+    assert_eq!(p.text("count_field"), "42", "letters are refused");
+    hold(&p, NAV_ACCEPT);
+    assert_eq!(p.text("count_field"), "10", "clamped to the range");
+    assert_eq!(p.text("number_said"), "COUNT 10  SPEED 1.5");
+    hold(&p, NAV_UP);
+    assert_eq!(p.text("count_field"), "10");
+    p.click("speed_field");
+    hold(&p, NAV_UP);
+    assert_eq!(p.text("speed_field"), "1.75", "one step of 0.25");
+    assert_eq!(p.text("number_said"), "COUNT 10  SPEED 1.75");
+    // The wheel steps the focused field too, downwards for positive notches.
+    p.wheel_at(p.center("speed_field"), 1.0);
+    assert_eq!(p.text("speed_field"), "1.5");
+    // Typing 1.6 and leaving the field snaps it to the nearest step.
+    hold(&p, NAV_SELECT_ALL);
+    p.type_text("1.6");
+    p.click("count_field");
+    assert_eq!(p.text("speed_field"), "1.5");
+    assert_eq!(p.eval::<f32>("speed_field.get(Slider).value"), 1.5);
+}
+
+#[test]
+fn the_text_page_survives_a_save_game_with_a_selection_and_history() {
+    let p = texty();
+    p.click("email_field");
+    p.type_text("save me");
+    hold(&p, NAV_LEFT | NAV_SHIFT);
+    let h = hash(&p);
+    let save = p.ecs.save_game(Default::default());
+    let q = Playground::new().unwrap();
+    q.ecs.load_game(&save, Policy::Strict).unwrap();
+    q.idle(1);
+    assert_eq!(q.text("email_field"), "save me");
+    // The selection and the undo history came back: undo works in the copy.
+    hold(&q, NAV_UNDO);
+    assert_eq!(q.text("email_field"), "");
+    let _ = h;
+}
+
+#[test]
+fn rich_text_draws_styled_runs_and_a_link_click_navigates() {
+    let p = texty();
+    let draws = p.ui_frame().draws;
+    let run = |word: &str| {
+        draws.iter().find_map(|d| match d {
+            UiDraw::Text {
+                text, pos, color, ..
+            } if text == word => Some((*pos, *color)),
+            _ => None,
+        })
+    };
+    let (_, plain) = run("A PARAGRAPH CAN BE").expect("the plain run");
+    let (_, tinted) = run("TINTED").expect("a colored run");
+    let (link_at, link_color) = run("LINK").expect("a link run");
+    assert_eq!(tinted, [0x4F, 0xC3, 0xC0, 255]);
+    assert_ne!(link_color, plain, "a link has the accent color");
+    // Bold draws its glyphs twice, one unit apart.
+    let bold: Vec<_> = draws
+        .iter()
+        .filter_map(|d| match d {
+            UiDraw::Text { text, pos, .. } if text == "BOLD," || text == "BOLD" => Some(pos[0]),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(bold.len(), 2, "{bold:?}");
+    assert!((bold[1] - bold[0] - 1.0).abs() < 0.01);
+    // Headings are three sizes.
+    let scale_of = |word: &str| {
+        draws.iter().find_map(|d| match d {
+            UiDraw::Text { text, scale, .. } if text == word => Some(*scale),
+            _ => None,
+        })
+    };
+    assert_eq!(
+        [
+            scale_of("TITLE"),
+            scale_of("SECTION"),
+            scale_of("SUBSECTION")
+        ],
+        [Some(3.0), Some(2.0), Some(1.0)]
+    );
+    // Clicking the link emits Navigate with its target; clicking beside it does not.
+    p.click_at([link_at[0] + 6.0 * 2.0, link_at[1] + 3.0]);
+    assert_eq!(p.text("link_said"), "CLICKED: PAGE:TEXT");
+    p.eval::<bool>("(link_said.set(Label(world.intern('CLICKED: NOTHING'))), True)[1]");
+    p.click_at([link_at[0] - 60.0, link_at[1] + 3.0]);
+    assert_eq!(p.text("link_said"), "CLICKED: NOTHING");
 }

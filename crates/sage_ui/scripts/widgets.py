@@ -36,12 +36,15 @@ from sage.ui import (
     Decor,
     Display,
     Flow,
+    History,
     Label,
     Paint,
     Rect,
     Scroll,
     Slider,
     States,
+    Rich,
+    TextField,
     TextStyle,
     Toggle,
     Transition,
@@ -135,13 +138,21 @@ class Ui:
         choice.set(Flow(COLUMN, START, START, 0.0, 4.0, 3.0, 4.0, 3.0))
         text_input = world.prefab("UiTextInput", base=label)
         text_input.set(Widget(TEXT_INPUT, 1, 0, 0)).set(Paint(0x14171CFF, 0x3A4150FF, 1.0, 0x6AA9FFFF))
-        text_input.set(Flow(COLUMN, START, START, 0.0, 3.0, 3.0, 3.0, 3.0)).set(Caret(0))
+        text_input.set(Flow(COLUMN, START, START, 0.0, 3.0, 3.0, 3.0, 3.0)).set(Caret(0)).set(TextField()).set(History())
         meter = world.prefab("UiMeter", base=panel)
         meter.set(Widget(METER, 1, 0, 0)).set(Paint(0x2A2F3AFF, 0x00000000, 0.0, 0x6AA9FFFF))
         meter.set(Slider(0.0, 0.0, 1.0, 0.0)).set(Box(2, 1.0, 1, 6.0))
         # The prefabs. Extend them like any prefab: world.prefab("Danger", base=ui.Button).
         image = world.prefab("UiImage", base=panel)
         image.set(ImageC(0, 0, 0xFFFFFFFF, 0, 1, 1))
+        # Headings: three sizes of text, and paragraphs of rich text.
+        for level, scale in ((1, 3.0), (2, 2.0), (3, 1.0)):
+            h = world.prefab("UiH%d" % level, base=label)
+            h.set(TextStyle(0xFFFFFFFF, scale, 0))
+            setattr(self, "H%d" % level, h)
+        rich = world.prefab("UiRich", base=label)
+        rich.set(TextStyle(0xFFFFFFFF, 1.0, 1)).set(Box(2, 1.0, 0, 0.0)).set(Paint(0x00000000, 0x00000000, 0.0, 0x6AA9FFFF))
+        self.RichText = rich
         self.Panel, self.Text, self.Button, self.Image, self.Choice = panel, label, button, image, choice
         self.Toggle, self.Slider, self.TextInput, self.Meter = toggle, slider, text_input, meter
 
@@ -245,6 +256,24 @@ class Ui:
     def text(self, parent, text, **style):
         return self.add(self.Text, parent, text=text, **style)
 
+    def heading(self, parent, text, level=1, **style):
+        """`<h1>` to `<h3>`: the same text at three sizes (3, 2 and 1 times
+        the glyph size; the face is a bitmap)."""
+        return self.add(getattr(self, "H%d" % max(1, min(3, level))), parent, text=text, **style)
+
+    def rich(self, parent, markup, **style):
+        """A paragraph of rich text that wraps to its width. The markup:
+        `**bold**`, `` `code` ``, `{#RRGGBB colored}` and `[label](target)`
+        for a link (a click emits `Navigate`). A backslash writes a special
+        character literally. `prefab=` picks the style prefab."""
+        e = self.add(style.pop("prefab", None) or self.RichText, parent, text="", **style)
+        e.set(Rich(world.intern(markup)))
+        return e
+
+    def link(self, parent, label, target, **style):
+        """A single link: rich text that is all one link."""
+        return self.rich(parent, "[%s](%s)" % (label, target), **style)
+
     def button(self, parent, text, **style):
         return self.add(self.Button, parent, text=text, **style)
 
@@ -273,8 +302,34 @@ class Ui:
         e.set(Slider(float(value), float(low), float(high), float(step)))
         return e
 
-    def text_input(self, parent, text="", **style):
-        return self.add(self.TextInput, parent, text=text, **style)
+    def _field(self, e, flags, placeholder, max_len):
+        e.set(TextField(flags=flags, max_len=max_len, placeholder=world.intern(placeholder) if placeholder else 0))
+        return e
+
+    def text_input(self, parent, text="", placeholder="", max_len=0, password=False, **style):
+        """A one-line text field. `placeholder` shows while it is empty;
+        `password` shows asterisks and refuses copy and cut. `prefab=` picks
+        the style prefab (any instance of the text input). Selection with
+        Shift or the mouse, Ctrl+arrows by word, Ctrl+A/C/X/V/Z/Y."""
+        e = self.add(style.pop("prefab", None) or self.TextInput, parent, text=text, **style)
+        return self._field(e, 2 if password else 0, placeholder, max_len)
+
+    def text_area(self, parent, text="", placeholder="", rows=4, max_len=0, **style):
+        """Several lines: Enter adds a line, long lines wrap, Up/Down move by
+        row, the wheel and PageUp/PageDown scroll. `rows` sets its height."""
+        style.setdefault("height", rows * 9 + 6)
+        e = self.add(style.pop("prefab", None) or self.TextInput, parent, text=text, **style)
+        return self._field(e, 1, placeholder, max_len or 4096)
+
+    def number(self, parent, value=0.0, low=0.0, high=0.0, step=0.0, **style):
+        """A number field: type a value (it settles on Enter or when focus
+        leaves), Up/Down or the wheel step it, and it clamps to the range
+        (when `high > low`) and snaps to `step`. The value is its `Slider`;
+        `Changed` reports it."""
+        text = ("%g" % value) if value == int(value) else ("%.6g" % value)
+        e = self.add(style.pop("prefab", None) or self.TextInput, parent, text=text, **style)
+        e.set(Slider(float(value), float(low), float(high), float(step)))
+        return self._field(e, 4, "", 24)
 
     def image(self, parent, source, **style):
         """An `<img>`: `source` is a path or an `ui.asset(path)` id. With no

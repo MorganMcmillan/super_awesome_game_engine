@@ -113,6 +113,50 @@ ui_component!(
     /// A text input's caret, as a character index.
     UiCaret { pos: u32 }
 );
+ui_component!(
+    /// What a text input keeps besides its text and caret. `flags`: 1 several
+    /// lines (Enter adds a line, text wraps), 2 masked (a password), 4
+    /// numeric (a number field: its `Slider` holds the value, range and step).
+    /// `max_len` 0 means the default. `placeholder` is a string id shown
+    /// while the text is empty. `anchor` is the other end of the selection,
+    /// `view` the first visible column (or row), `want` the column vertical
+    /// motion aims for plus one (0 for none).
+    UiTextField {
+        flags: u32,
+        max_len: u32,
+        placeholder: u64,
+        anchor: u32,
+        view: u32,
+        want: u32
+    }
+);
+ui_component!(
+    /// A text input's undo and redo stacks: up to six snapshots each (string
+    /// id and caret), oldest first, and what the last edit was.
+    UiHistory {
+        last: u32,
+        un: u32,
+        rn: u32,
+        u0: u64, uc0: u32, u1: u64, uc1: u32, u2: u64, uc2: u32, u3: u64, uc3: u32, u4: u64, uc4: u32, u5: u64, uc5: u32,
+        r0: u64, rc0: u32, r1: u64, rc1: u32, r2: u64, rc2: u32, r3: u64, rc3: u32, r4: u64, rc4: u32, r5: u64, rc5: u32
+    }
+);
+ui_component!(
+    /// Clipboard singleton. `text` is the string id of the clipboard's text
+    /// (the host puts the system clipboard there before a paste); `out` is 1
+    /// when a copy or cut changed it and the host should publish it.
+    UiClipboard { text: u64, out: u32 }
+);
+ui_component!(
+    /// Rich text: `markup` is a string id in the small markup form (`**bold**`,
+    /// `` `code` ``, `[label](target)`, `{#RRGGBB colored}`). It replaces the
+    /// node's `Label` as the text. Clicking a link emits `Navigate`.
+    UiRich { markup: u64 }
+);
+ui_component!(UiNavigate {
+    target: u64,
+    link: u64
+});
 ui_component!(UiToggle { on: u32 });
 ui_component!(UiSlider {
     value: f32,
@@ -298,6 +342,74 @@ ui_component!(
     }
 );
 
+const HISTORY_SLOTS: usize = 6;
+
+fn history_from(h: &UiHistory, strings: &StringTable) -> crate::text::History {
+    use crate::text::{History, Kind, Snapshot};
+    let u = [
+        (h.u0, h.uc0),
+        (h.u1, h.uc1),
+        (h.u2, h.uc2),
+        (h.u3, h.uc3),
+        (h.u4, h.uc4),
+        (h.u5, h.uc5),
+    ];
+    let r = [
+        (h.r0, h.rc0),
+        (h.r1, h.rc1),
+        (h.r2, h.rc2),
+        (h.r3, h.rc3),
+        (h.r4, h.rc4),
+        (h.r5, h.rc5),
+    ];
+    let snap = |&(t, c): &(u64, u32)| Snapshot {
+        text: strings.get(t).unwrap_or("").to_string(),
+        caret: c as usize,
+    };
+    History {
+        undo: u[..(h.un as usize).min(HISTORY_SLOTS)]
+            .iter()
+            .map(snap)
+            .collect(),
+        redo: r[..(h.rn as usize).min(HISTORY_SLOTS)]
+            .iter()
+            .map(snap)
+            .collect(),
+        last: Kind::from_u32(h.last),
+    }
+}
+
+fn history_to(h: &crate::text::History, strings: &mut StringTable) -> UiHistory {
+    let mut o = UiHistory {
+        last: h.last.to_u32(),
+        un: h.undo.len().min(HISTORY_SLOTS) as u32,
+        rn: h.redo.len().min(HISTORY_SLOTS) as u32,
+        ..UiHistory::default()
+    };
+    let mut put = |list: &[crate::text::Snapshot]| -> [(u64, u32); HISTORY_SLOTS] {
+        let mut out = [(0u64, 0u32); HISTORY_SLOTS];
+        for (k, snap) in list.iter().take(HISTORY_SLOTS).enumerate() {
+            out[k] = (strings.intern(&snap.text), snap.caret as u32);
+        }
+        out
+    };
+    let u = put(&h.undo);
+    let r = put(&h.redo);
+    (o.u0, o.uc0) = u[0];
+    (o.r0, o.rc0) = r[0];
+    (o.u1, o.uc1) = u[1];
+    (o.r1, o.rc1) = r[1];
+    (o.u2, o.uc2) = u[2];
+    (o.r2, o.rc2) = r[2];
+    (o.u3, o.uc3) = u[3];
+    (o.r3, o.rc3) = r[3];
+    (o.u4, o.uc4) = u[4];
+    (o.r4, o.rc4) = r[4];
+    (o.u5, o.uc5) = u[5];
+    (o.r5, o.rc5) = r[5];
+    o
+}
+
 /// The natural size of every image asset the UI may show, by `AssetId`.
 /// The host registers them as it loads images (`register_image`); layout
 /// uses them to size an image whose box is `auto`.
@@ -323,6 +435,8 @@ struct Source {
     slider: Option<UiSlider>,
     scroll: Option<UiScroll>,
     caret: Option<UiCaret>,
+    field: Option<UiTextField>,
+    hist: Option<UiHistory>,
     label: Option<UiLabel>,
     shown: Option<UiShown>,
     transition: Option<u32>,
@@ -368,6 +482,9 @@ fn build(
         let slider = e.try_get::<&UiSlider>(|s| *s);
         let scroll = e.try_get::<&UiScroll>(|s| *s);
         let caret = e.try_get::<&UiCaret>(|c| *c);
+        let field = e.try_get::<&UiTextField>(|c| *c);
+        let rich = e.try_get::<&UiRich>(|c| *c);
+        let hist = e.try_get::<&UiHistory>(|c| *c);
         let modal = e.try_get::<&UiModal>(|m| m.on != 0);
         let image = e.try_get::<&UiImage>(|i| *i);
         let slice = e.try_get::<&UiSlice>(|i| *i);
@@ -409,6 +526,12 @@ fn build(
             text = strings.get(l.text).unwrap_or("").to_string();
             n.text = text.clone();
         }
+        if let Some(r) = rich {
+            let parsed = crate::text::parse_markup(strings.get(r.markup).unwrap_or(""));
+            n.text = parsed.text.clone();
+            n.hoverable |= !parsed.links.is_empty();
+            n.rich = Some(parsed);
+        }
         if let Some(t) = style {
             n.text_color = t.color;
             n.text_scale = if t.scale > 0.0 { t.scale } else { 1.0 };
@@ -421,10 +544,27 @@ fn build(
         if let Some(c) = caret {
             n.caret = c.pos as usize;
         }
+        if let Some(t) = field {
+            n.field.multiline = t.flags & 1 != 0;
+            n.field.masked = t.flags & 2 != 0;
+            n.field.numeric = t.flags & 4 != 0;
+            if t.max_len != 0 {
+                n.field.max_len = t.max_len as usize;
+            }
+            n.field.placeholder = strings.get(t.placeholder).unwrap_or("").to_string();
+            n.field.anchor = t.anchor as usize;
+            n.field.view = t.view as usize;
+            n.field.want = (t.want as usize).wrapping_sub(1);
+        } else {
+            n.field.anchor = n.caret;
+        }
+        if let Some(h) = &hist {
+            n.field.hist = history_from(h, strings);
+        }
         n.modal = modal.unwrap_or(false);
         n.hidden = display.unwrap_or(false);
         n.context = context.unwrap_or(false);
-        n.hoverable = tooltip.unwrap_or(false);
+        n.hoverable |= tooltip.unwrap_or(false);
         if let Some(l) = layer {
             n.hidden |= l.open == 0;
             n.layer = Some(LayerNode {
@@ -525,6 +665,8 @@ fn build(
             slider,
             scroll,
             caret,
+            field,
+            hist,
             label,
             shown,
             transition,
@@ -563,6 +705,10 @@ fn step(world: &WorldRef, strings: &RefCell<StringTable>, sizes: &RefCell<ImageS
         nav,
         ch,
         wheel: pointer.wheel,
+        paste: {
+            let t = world.get::<&UiClipboard>(|c| c.text);
+            strings.borrow().get(t).map(str::to_string)
+        },
     };
     // A modal drops focus that is outside it; a layer that opens remembers
     // the focus from before that, to give it back on close.
@@ -621,6 +767,23 @@ fn step(world: &WorldRef, strings: &RefCell<StringTable>, sizes: &RefCell<ImageS
                 value: n.value,
                 ..old
             });
+        }
+        if let Some(old) = src.field {
+            let new = UiTextField {
+                anchor: n.field.anchor as u32,
+                view: n.field.view as u32,
+                want: n.field.want.wrapping_add(1) as u32,
+                ..old
+            };
+            if new != old {
+                e.set(new);
+            }
+        }
+        if let Some(old) = src.hist {
+            let h = history_to(&n.field.hist, &mut strings.borrow_mut());
+            if h != old {
+                e.set(h);
+            }
         }
         if src.label.is_some() && n.widget == Widget::TextInput && n.text != src.text {
             let id = strings.borrow_mut().intern(&n.text);
@@ -718,6 +881,11 @@ fn step(world: &WorldRef, strings: &RefCell<StringTable>, sizes: &RefCell<ImageS
     // Events last, so observers see the updated state.
     let by_sid: BTreeMap<u64, u64> = sources.iter().map(|s| (s.sid, s.entity)).collect();
     for ev in events {
+        if let EventKind::Copied(text) = &ev.kind {
+            let id = strings.borrow_mut().intern(text);
+            world.set(UiClipboard { text: id, out: 1 });
+            continue;
+        }
         let Some(&entity) = by_sid.get(&ev.target) else {
             continue;
         };
@@ -735,6 +903,11 @@ fn step(world: &WorldRef, strings: &RefCell<StringTable>, sizes: &RefCell<ImageS
             EventKind::Focused => e.emit(&UiFocused { target }),
             EventKind::Dismissed => e.emit(&UiDismissed { target }),
             EventKind::ContextRequested(x, y) => e.emit(&UiContextRequested { target, x, y }),
+            EventKind::Navigate(link) => {
+                let link = strings.borrow_mut().intern(&link);
+                e.emit(&UiNavigate { target, link })
+            }
+            EventKind::Copied(_) => {}
         };
     }
 }
@@ -809,6 +982,11 @@ pub fn setup(world: &World, ecs: &Ecs) -> Result<(), String> {
         UiToggle => "sage::ui::Toggle",
         UiScroll => "sage::ui::Scroll",
         UiCaret => "sage::ui::Caret",
+        UiTextField => "sage::ui::TextField",
+        UiRich => "sage::ui::Rich",
+        UiNavigate => "sage::ui::Navigate",
+        UiHistory => "sage::ui::History",
+        UiClipboard => "sage::ui::Clipboard",
         UiModal => "sage::ui::Modal",
         UiImage => "sage::ui::Image",
         UiSlice => "sage::ui::Slice",
@@ -870,6 +1048,7 @@ pub fn setup(world: &World, ecs: &Ecs) -> Result<(), String> {
     world.set(UiPointer::default());
     world.set(UiNav::default());
     world.set(UiTextEntry::default());
+    world.set(UiClipboard::default());
     world.set(UiScreen { w: 320.0, h: 180.0 });
     world.set(UiInteraction::default());
     let strings = ecs.strings();
