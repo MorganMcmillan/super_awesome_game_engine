@@ -119,6 +119,74 @@ fn keys_down(keys: &KeyboardState) -> Vec<(bool, u32, bool)> {
     ]
 }
 
+/// What the window's events add up to between ticks: where the mouse is,
+/// the button, the wheel and the typed characters. Kept apart from the loop
+/// so the translation can be tested with plain `Event` values.
+#[derive(Default)]
+pub struct UiEvents {
+    /// Mouse position in window coordinates.
+    pub mouse: [f32; 2],
+    pub inside: bool,
+    pub down: bool,
+    wheel: f32,
+    typed: VecDeque<char>,
+}
+
+impl UiEvents {
+    /// Takes one event in. Returns true if it asks to quit (the window was
+    /// closed, or Escape).
+    pub fn handle(&mut self, event: &Event) -> bool {
+        match event {
+            Event::Quit { .. }
+            | Event::KeyDown {
+                keycode: Some(Keycode::Escape),
+                ..
+            } => return true,
+            Event::MouseMotion { x, y, .. } => {
+                self.mouse = [*x, *y];
+                self.inside = true;
+            }
+            Event::MouseButtonDown {
+                mouse_btn: MouseButton::Left,
+                x,
+                y,
+                ..
+            } => {
+                self.mouse = [*x, *y];
+                self.inside = true;
+                self.down = true;
+            }
+            Event::MouseButtonUp {
+                mouse_btn: MouseButton::Left,
+                ..
+            } => self.down = false,
+            // SDL's wheel is positive away from the user (scroll up); the UI
+            // counts positive as content moving down.
+            Event::MouseWheel { y, .. } => self.wheel -= *y,
+            Event::TextInput { text, .. } => self.typed.extend(text.chars()),
+            Event::Window {
+                win_event: WindowEvent::MouseLeave,
+                ..
+            } => self.inside = false,
+            _ => {}
+        }
+        false
+    }
+
+    /// The input for one tick: the pointer through `to_ui` (window
+    /// coordinates to UI units), one typed character, and the wheel since
+    /// the last tick. `nav` is the sampled `NAV_*` bits.
+    pub fn tick(&mut self, nav: u32, to_ui: impl Fn([f32; 2]) -> [f32; 2]) -> UiTickInput {
+        UiTickInput {
+            pointer: self.inside.then(|| to_ui(self.mouse)),
+            down: self.down,
+            nav,
+            ch: self.typed.pop_front(),
+            wheel: std::mem::take(&mut self.wheel),
+        }
+    }
+}
+
 /// Runs `app` in a window until it is closed or Escape is pressed (or
 /// `options.max_frames` frames were drawn). Needs the GPU renderer.
 pub fn run_ui_windowed<A: UiApp>(app: &mut A, options: &WindowOptions) -> Result<UiRun, String> {
@@ -139,46 +207,14 @@ pub fn run_ui_windowed<A: UiApp>(app: &mut A, options: &WindowOptions) -> Result
     let tick_len = Duration::from_secs_f32(TICK_DT);
     let (mut last, mut accumulator) = (Instant::now(), Duration::ZERO);
     let (mut frames, mut ticks) = (0u64, 0u64);
-    // Mouse position in window coordinates, whether it is inside, the
-    // button, the wheel since the last tick, and typed characters waiting.
-    let (mut mouse, mut inside, mut down) = ([0.0f32; 2], false, false);
-    let (mut wheel, mut typed) = (0.0f32, VecDeque::<char>::new());
+    let mut input_events = UiEvents::default();
     let mut nav = NavSampler::default();
     let mut last_frame = None;
 
     'run: loop {
         for event in events.poll_iter() {
-            match event {
-                Event::Quit { .. }
-                | Event::KeyDown {
-                    keycode: Some(Keycode::Escape),
-                    ..
-                } => break 'run,
-                Event::MouseMotion { x, y, .. } => {
-                    mouse = [x, y];
-                    inside = true;
-                }
-                Event::MouseButtonDown {
-                    mouse_btn: MouseButton::Left,
-                    x,
-                    y,
-                    ..
-                } => {
-                    mouse = [x, y];
-                    inside = true;
-                    down = true;
-                }
-                Event::MouseButtonUp {
-                    mouse_btn: MouseButton::Left,
-                    ..
-                } => down = false,
-                Event::MouseWheel { y, .. } => wheel -= y,
-                Event::TextInput { text, .. } => typed.extend(text.chars()),
-                Event::Window {
-                    win_event: WindowEvent::MouseLeave,
-                    ..
-                } => inside = false,
-                _ => {}
+            if input_events.handle(&event) {
+                break 'run;
             }
         }
         let now = Instant::now();
@@ -195,17 +231,14 @@ pub fn run_ui_windowed<A: UiApp>(app: &mut A, options: &WindowOptions) -> Result
             let (scale, origin) = ui_view(viewport, app.size());
             // Window coordinates to pixels (they differ on a scaled display),
             // then to UI units.
-            let px = [
-                mouse[0] * pw as f32 / ww.max(1) as f32,
-                mouse[1] * ph as f32 / wh.max(1) as f32,
-            ];
-            let input = UiTickInput {
-                pointer: inside.then(|| [(px[0] - origin[0]) / scale, (px[1] - origin[1]) / scale]),
-                down,
-                nav: nav.sample(&keys_down(&events.keyboard_state())),
-                ch: typed.pop_front(),
-                wheel: std::mem::take(&mut wheel),
+            let to_ui = |m: [f32; 2]| {
+                let px = [
+                    m[0] * pw as f32 / ww.max(1) as f32,
+                    m[1] * ph as f32 / wh.max(1) as f32,
+                ];
+                [(px[0] - origin[0]) / scale, (px[1] - origin[1]) / scale]
             };
+            let input = input_events.tick(nav.sample(&keys_down(&events.keyboard_state())), to_ui);
             app.tick(&input);
             ticks += 1;
             accumulator -= tick_len;
@@ -269,5 +302,138 @@ mod tests {
         assert!(bits[1..24].iter().all(|&b| b == 0));
         assert_eq!(bits[24], B);
         assert_eq!(bits[25], 0, "cleared the tick after a repeat");
+    }
+
+    fn button(down: bool, x: f32, y: f32) -> Event {
+        let (timestamp, window_id, which, clicks) = (0, 0, 0, 1);
+        if down {
+            Event::MouseButtonDown {
+                timestamp,
+                window_id,
+                which,
+                mouse_btn: MouseButton::Left,
+                clicks,
+                x,
+                y,
+            }
+        } else {
+            Event::MouseButtonUp {
+                timestamp,
+                window_id,
+                which,
+                mouse_btn: MouseButton::Left,
+                clicks,
+                x,
+                y,
+            }
+        }
+    }
+
+    fn motion(x: f32, y: f32) -> Event {
+        Event::MouseMotion {
+            timestamp: 0,
+            window_id: 0,
+            which: 0,
+            mousestate: sdl3::mouse::MouseState::from_sdl_state(0),
+            x,
+            y,
+            xrel: 0.0,
+            yrel: 0.0,
+        }
+    }
+
+    fn typed(text: &str) -> Event {
+        Event::TextInput {
+            timestamp: 0,
+            window_id: 0,
+            text: text.into(),
+        }
+    }
+
+    #[test]
+    fn mouse_events_become_a_pointer_in_ui_units() {
+        let mut e = UiEvents::default();
+        let to_ui = |m: [f32; 2]| [(m[0] - 10.0) / 2.0, (m[1] - 4.0) / 2.0];
+        assert_eq!(
+            e.tick(0, to_ui).pointer,
+            None,
+            "no pointer before the mouse moves"
+        );
+        e.handle(&motion(30.0, 24.0));
+        let t = e.tick(0, to_ui);
+        assert_eq!((t.pointer, t.down), (Some([10.0, 10.0]), false));
+        assert!(!e.handle(&button(true, 40.0, 24.0)));
+        let t = e.tick(0, to_ui);
+        assert_eq!(
+            (t.pointer, t.down),
+            (Some([15.0, 10.0]), true),
+            "a press also moves the pointer"
+        );
+        e.handle(&button(false, 40.0, 24.0));
+        assert!(!e.tick(0, to_ui).down);
+        // Leaving the window removes the pointer; moving again brings it back.
+        e.handle(&Event::Window {
+            timestamp: 0,
+            window_id: 0,
+            win_event: WindowEvent::MouseLeave,
+        });
+        assert_eq!(e.tick(0, to_ui).pointer, None);
+        e.handle(&motion(12.0, 6.0));
+        assert_eq!(e.tick(0, to_ui).pointer, Some([1.0, 1.0]));
+    }
+
+    #[test]
+    fn other_buttons_are_ignored_and_escape_or_close_quits() {
+        let mut e = UiEvents::default();
+        let right = Event::MouseButtonDown {
+            timestamp: 0,
+            window_id: 0,
+            which: 0,
+            mouse_btn: MouseButton::Right,
+            clicks: 1,
+            x: 1.0,
+            y: 1.0,
+        };
+        assert!(!e.handle(&right));
+        assert!(!e.down && !e.inside);
+        let esc = Event::KeyDown {
+            timestamp: 0,
+            window_id: 0,
+            keycode: Some(Keycode::Escape),
+            scancode: Some(Scancode::Escape),
+            keymod: sdl3::keyboard::Mod::empty(),
+            repeat: false,
+            which: 0,
+            raw: 0,
+        };
+        assert!(e.handle(&esc));
+        assert!(e.handle(&Event::Quit { timestamp: 0 }));
+    }
+
+    #[test]
+    fn typed_text_arrives_one_character_per_tick_and_the_wheel_is_consumed_once() {
+        let mut e = UiEvents::default();
+        let id = |m| m;
+        e.handle(&typed("hé"));
+        e.handle(&typed("!"));
+        let got: Vec<Option<char>> = (0..4).map(|_| e.tick(0, id).ch).collect();
+        assert_eq!(got, vec![Some('h'), Some('é'), Some('!'), None]);
+        // Two notches away from the user scroll up (negative); one back down.
+        let wheel = |y| Event::MouseWheel {
+            timestamp: 0,
+            window_id: 0,
+            which: 0,
+            x: 0.0,
+            y,
+            direction: sdl3::mouse::MouseWheelDirection::Normal,
+            mouse_x: 0.0,
+            mouse_y: 0.0,
+            integer_x: 0,
+            integer_y: y as i32,
+        };
+        e.handle(&wheel(2.0));
+        e.handle(&wheel(-0.5));
+        assert_eq!(e.tick(0, id).wheel, -1.5);
+        assert_eq!(e.tick(0, id).wheel, 0.0, "consumed");
     }
 }

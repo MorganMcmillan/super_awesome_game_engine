@@ -984,6 +984,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "ui_playground"
+version = "0.0.1"
+dependencies = [
+ "flecs_ecs",
+ "pyo3",
+ "sage_assets",
+ "sage_core",
+ "sage_ecs_py",
+ "sage_platform",
+ "sage_script",
+ "sage_ui",
+]
+
+[[package]]
 name = "unicode-ident"
 version = "1.0.27"
 source = "registry+https://github.com/rust-lang/crates.io-index"

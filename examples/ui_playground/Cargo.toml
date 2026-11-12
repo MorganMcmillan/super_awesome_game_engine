@@ -1,0 +1,17 @@
+[package]
+name = "ui_playground"
+description = "A playground for the UI module: every widget, a theme made of style prefabs, in a real window."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+[dependencies]
+flecs_ecs.workspace = true
+pyo3.workspace = true
+sage_assets.workspace = true
+sage_core.workspace = true
+sage_ecs_py.workspace = true
+sage_platform.workspace = true
+sage_script.workspace = true
+sage_ui.workspace = true

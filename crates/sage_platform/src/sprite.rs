@@ -361,8 +361,11 @@ pub fn rasterize(
             let (a, b) = (to_px(v0.pos), to_px(v2.pos));
             let (x0, x1) = (a[0].min(b[0]), a[0].max(b[0]));
             let (y0, y1) = (a[1].min(b[1]), a[1].max(b[1]));
-            for y in 0..h {
-                for x in 0..w {
+            // Only the pixels whose centers can be inside the quad.
+            let first = |lo: f32| ((lo - 0.5).ceil().max(0.0)) as usize;
+            let last = |hi: f32, n: usize| ((hi - 0.5).ceil().max(0.0) as usize).min(n);
+            for y in first(y0)..last(y1, h) {
+                for x in first(x0)..last(x1, w) {
                     let (cx, cy) = (x as f32 + 0.5, y as f32 + 0.5);
                     if cx < x0 || cx >= x1 || cy < y0 || cy >= y1 {
                         continue;

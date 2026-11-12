@@ -12,6 +12,7 @@ members = [
     "tools/shaderc",
     "examples/pong",
     "examples/ui_demo",
+    "examples/ui_playground",
     "spikes/flecs_features",
     "spikes/pyo3_cost",
 ]
@@ -27,6 +28,7 @@ default-members = [
     "tools/shaderc",
     "examples/pong",
     "examples/ui_demo",
+    "examples/ui_playground",
     "spikes/flecs_features",
 ]
 
