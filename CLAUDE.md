@@ -7,7 +7,7 @@ A game engine for rapid prototyping with a low skill floor and a high ceiling. G
 
 ## Source of truth
 - `claude/game-engine-design-doc.md` is the design. Read "How to use this document" and the tag meanings first. The design doc plans to move it to `docs/design.md`; ask Morgan before moving it. Until then the `claude/` copy is authoritative.
-- `docs/ui-html-parity.md`: the plan for recreating HTML's important features in the ECS UI (design doc 9.3). Phases P0 to P9; the editor (M3) is built on this UI. Dependencies it mentions are not yet approved.
+- `docs/ui-html-parity.md`: the plan for recreating HTML's important features in the ECS UI (design doc 9.4). Phases P0 to P9; the editor (M3) is built on this UI. Dependencies it mentions are not yet approved.
 - `claude/design-exercises.md` is design homework for Morgan ("exercise N" in the design doc). Do not attempt it.
 - `docs/milestone-0.md`: acceptance status and the placeholders waiting on Morgan. `docs/spikes/<id>.md`: spike write-ups. `docs/dependencies.md`: pins and licenses.
 - The Python–Flecs binding (`sage_ecs_py`, design doc 3.1 and 5.4, revision 4) and Pong written in Python (`examples/pong`) were added at Morgan's request while Milestone 0 is open.

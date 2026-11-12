@@ -73,7 +73,7 @@ The numbered items below were the questions; the recommendation in each is now t
 | drag and drop, selection, resize | F7 | `Draggable`, `DropTarget`, `Resizable` components and events |
 
 ## Order of work (each phase ships tested, and adds a page to the playground)
-- **P0** Decisions above. *Done 2026-11-11:* design doc revision 8, new 9.3, 10.6 decided.
+- **P0** Decisions above. *Done 2026-11-11:* design doc revision 8, new 9.4, 10.6 decided.
 - **P1** F1 + F2 + F6 (variants, rounded and shadow by texture): image, 9-slice, icons, opacity, gradients, borders; playground page "Media and style".
 - **P2** F3 layers: tooltips, dropdown/select/combo/datalist, popup menus, menu bar, context menu, dialog rebuilt on layers.
 - **P3** F4 text engine and F7 selection/clipboard: text input completed, textarea, number, password, placeholder, rich text, headings, links, fonts (per decision 1).
