@@ -45,6 +45,31 @@ class Clicked(Component):
     def __init__(self, target: u64 = ...) -> None: ...
 
 
+class Combo(Component):
+    """Native component `sage.ui.Combo`."""
+
+    popup: u64
+    count: u32
+    def __init__(self, popup: u64 = ..., count: u32 = ...) -> None: ...
+
+
+class Context(Component):
+    """Native component `sage.ui.Context`."""
+
+    on: u32
+    popup: u64
+    def __init__(self, on: u32 = ..., popup: u64 = ...) -> None: ...
+
+
+class ContextRequested(Component):
+    """Native component `sage.ui.ContextRequested`."""
+
+    target: u64
+    x: f32
+    y: f32
+    def __init__(self, target: u64 = ..., x: f32 = ..., y: f32 = ...) -> None: ...
+
+
 class Decor(Component):
     """Native component `sage.ui.Decor`."""
 
@@ -56,6 +81,13 @@ class Decor(Component):
     grad_dir: u32
     fade: f32
     def __init__(self, radius: f32 = ..., shadow_blur: f32 = ..., shadow_dy: f32 = ..., shadow_color: u32 = ..., grad_to: u32 = ..., grad_dir: u32 = ..., fade: f32 = ...) -> None: ...
+
+
+class Dismissed(Component):
+    """Native component `sage.ui.Dismissed`."""
+
+    target: u64
+    def __init__(self, target: u64 = ...) -> None: ...
 
 
 class Display(Component):
@@ -105,8 +137,9 @@ class Interaction(Component):
     active: u64
     focus: u64
     prev_down: u32
+    prev_secondary: u32
     prev_nav: u32
-    def __init__(self, hot: u64 = ..., active: u64 = ..., focus: u64 = ..., prev_down: u32 = ..., prev_nav: u32 = ...) -> None: ...
+    def __init__(self, hot: u64 = ..., active: u64 = ..., focus: u64 = ..., prev_down: u32 = ..., prev_secondary: u32 = ..., prev_nav: u32 = ...) -> None: ...
 
 
 class Label(Component):
@@ -114,6 +147,49 @@ class Label(Component):
 
     text: u64
     def __init__(self, text: u64 = ...) -> None: ...
+
+
+class Layer(Component):
+    """Native component `sage.ui.Layer`."""
+
+    open: u32
+    anchor: u64
+    placement: u32
+    align: u32
+    gap: f32
+    x: f32
+    y: f32
+    flags: u32
+    focus: u64
+    was_open: u32
+    restore: u64
+    def __init__(self, open: u32 = ..., anchor: u64 = ..., placement: u32 = ..., align: u32 = ..., gap: f32 = ..., x: f32 = ..., y: f32 = ..., flags: u32 = ..., focus: u64 = ..., was_open: u32 = ..., restore: u64 = ...) -> None: ...
+
+
+class MenuChosen(Component):
+    """Native component `sage.ui.MenuChosen`."""
+
+    target: u64
+    id: u32
+    def __init__(self, target: u64 = ..., id: u32 = ...) -> None: ...
+
+
+class MenuItem(Component):
+    """Native component `sage.ui.MenuItem`."""
+
+    id: u32
+    flags: u32
+    sub: u64
+    mark: u64
+    def __init__(self, id: u32 = ..., flags: u32 = ..., sub: u64 = ..., mark: u64 = ...) -> None: ...
+
+
+class MenuTitle(Component):
+    """Native component `sage.ui.MenuTitle`."""
+
+    popup: u64
+    bar: u64
+    def __init__(self, popup: u64 = ..., bar: u64 = ...) -> None: ...
 
 
 class Modal(Component):
@@ -128,6 +204,14 @@ class Nav(Component):
 
     bits: u32
     def __init__(self, bits: u32 = ...) -> None: ...
+
+
+class Option(Component):
+    """Native component `sage.ui.Option`."""
+
+    index: i32
+    owner: u64
+    def __init__(self, index: i32 = ..., owner: u64 = ...) -> None: ...
 
 
 class Paint(Component):
@@ -174,6 +258,24 @@ class Scroll(Component):
 
     offset: f32
     def __init__(self, offset: f32 = ...) -> None: ...
+
+
+class Select(Component):
+    """Native component `sage.ui.Select`."""
+
+    value: i32
+    count: u32
+    popup: u64
+    label: u64
+    def __init__(self, value: i32 = ..., count: u32 = ..., popup: u64 = ..., label: u64 = ...) -> None: ...
+
+
+class Selected(Component):
+    """Native component `sage.ui.Selected`."""
+
+    target: u64
+    index: i32
+    def __init__(self, target: u64 = ..., index: i32 = ...) -> None: ...
 
 
 class Shown(Component):
@@ -272,6 +374,14 @@ class Toggled(Component):
     target: u64
     on: u32
     def __init__(self, target: u64 = ..., on: u32 = ...) -> None: ...
+
+
+class Tooltip(Component):
+    """Native component `sage.ui.Tooltip`."""
+
+    text: u64
+    delay: u32
+    def __init__(self, text: u64 = ..., delay: u32 = ...) -> None: ...
 
 
 class Transition(Component):

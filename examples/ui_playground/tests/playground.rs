@@ -240,7 +240,7 @@ fn the_dialog_is_a_modal() {
         texts(&p).contains(&"DIALOG".to_string()),
         "the dialog opened"
     );
-    assert!(p.eval::<bool>("driver.get(Driver).dialog is not None"));
+    assert!(p.eval::<bool>("ui.is_open(dialog_back)"));
     // The backdrop blocks the pointer: a click on a button behind it is lost.
     p.click("primary");
     assert_eq!(p.text("clicks"), "CLICKS: 0");
@@ -271,7 +271,7 @@ fn the_dialog_is_a_modal() {
         !texts(&p).contains(&"DIALOG".to_string()),
         "the dialog closed"
     );
-    assert!(p.eval::<bool>("driver.get(Driver).dialog is None"));
+    assert!(!p.eval::<bool>("ui.is_open(dialog_back)"));
     p.idle(2);
     assert_eq!(texts(&p), before, "the same text is on screen as before");
     p.click("primary");
@@ -344,7 +344,7 @@ fn the_playground_is_deterministic_and_survives_a_save_game() {
         a.render(SIZE).to_png_bytes().unwrap()
     );
     // The loaded dialog still works: OK closes it.
-    assert!(c.eval::<bool>("driver.get(Driver).dialog is not None"));
+    assert!(c.eval::<bool>("ui.is_open(dialog_back)"));
     let _ = (Policy::Lenient, NAV_END);
 }
 

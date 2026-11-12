@@ -53,6 +53,9 @@ class Entity:
     @property
     def parent(self) -> Entity | None: ...
     @property
+    def children(self) -> list[Entity]:
+        """Entities that are children of this one, in StableId order."""
+    @property
     def enabled(self) -> bool: ...
     def set(self, value: object) -> Self:
         """Sets a component value (copied in). Returns the entity for chaining."""

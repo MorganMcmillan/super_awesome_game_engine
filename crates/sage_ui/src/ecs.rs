@@ -28,8 +28,8 @@ use sage_scene::StringTable;
 
 use crate::interact::{EventKind, UiInput, UiState, update};
 use crate::layout::{
-    Align, Direction, Fit, GradientNode, ImageNode, Justify, Node, ShadowNode, Size, SliceNode,
-    Tree, Widget, layout,
+    Align, Direction, Edge, Fit, GradientNode, ImageNode, Justify, LayerNode, Node, Placement,
+    ShadowNode, Size, SliceNode, Tree, Widget, layout,
 };
 use crate::style::{Resolved, States, Variant, ease, resolve};
 
@@ -178,6 +178,83 @@ ui_component!(
     UiDisplay { none: u32 }
 );
 
+ui_component!(
+    /// A floating node (popup, dropdown list, menu, tooltip, dialog): a root
+    /// of the tree, drawn above everything else, placed next to the node
+    /// whose StableId is `anchor` (or at `x`, `y`) and closed while `open`
+    /// is 0. `placement`: 0 below, 1 above, 2 right, 3 left, 4 at the point;
+    /// `align`: 0 start, 1 center, 2 end; `flags`: 1 flip when it would not
+    /// fit, 2 as wide as the anchor, 4 dismiss on an outside press or
+    /// Escape (the engine then sets `open` to 0 and emits `Dismissed`),
+    /// 8 move focus into it when it opens (to the node with StableId
+    /// `focus` if that is set, else the first focusable one). `was_open` and
+    /// `restore` are computed: focus returns to `restore` when it closes.
+    UiLayer {
+        open: u32,
+        anchor: u64,
+        placement: u32,
+        align: u32,
+        gap: f32,
+        x: f32,
+        y: f32,
+        flags: u32,
+        focus: u64,
+        was_open: u32,
+        restore: u64,
+    }
+);
+ui_component!(
+    /// `on` 1: a secondary press over this node emits `ContextRequested`.
+    /// `popup` is the menu layer the kit opens there (`ui.context_menu`).
+    UiContext { on: u32, popup: u64 }
+);
+ui_component!(
+    /// Text shown in a tooltip after the pointer rests on the node for
+    /// `delay` ticks; `text` is an id from `world.intern`. The kit's tooltip
+    /// system does the showing.
+    UiTooltip { text: u64, delay: u32 }
+);
+ui_component!(
+    /// A drop-down: this entity is the button showing the chosen option;
+    /// `value` is its index (-1 for none), `popup` the StableId of the layer
+    /// holding the options, and `label` the text node showing the chosen
+    /// option. Made by `ui.select`.
+    UiSelect { value: i32, count: u32, popup: u64, label: u64 }
+);
+ui_component!(
+    /// One option of a select or combo box: its `index`, and the StableId of
+    /// the `owner` it belongs to.
+    UiOption { index: i32, owner: u64 }
+);
+ui_component!(
+    /// A combo box (a text input with a filtered list of suggestions): the
+    /// `popup` layer, and how many options are listed.
+    UiCombo { popup: u64, count: u32 }
+);
+ui_component!(
+    /// A menu item. `flags`: 1 check item, 2 checked, 4 separator, 8 opens a
+    /// submenu, 16 disabled. `sub` is the submenu layer's StableId and `mark`
+    /// the node that shows the check.
+    UiMenuItem { id: u32, flags: u32, sub: u64, mark: u64 }
+);
+ui_component!(
+    /// A menu bar title: the `popup` menu it opens and the bar it is in.
+    UiMenuTitle { popup: u64, bar: u64 }
+);
+ui_component!(UiSelected {
+    target: u64,
+    index: i32
+});
+ui_component!(UiMenuChosen {
+    target: u64,
+    id: u32
+});
+ui_component!(UiDismissed { target: u64 });
+ui_component!(UiContextRequested {
+    target: u64,
+    x: f32,
+    y: f32
+});
 ui_component!(UiClicked { target: u64 });
 ui_component!(UiToggled {
     target: u64,
@@ -193,6 +270,7 @@ ui_component!(UiFocused { target: u64 });
 
 ui_component!(
     /// Input singleton: the pointer, in UI units. `present` 0 means none.
+    /// `down` is a set of held buttons: 1 primary, 2 secondary, 4 middle.
     /// `wheel` is this tick's notches; positive scrolls content down.
     UiPointer { x: f32, y: f32, present: u32, down: u32, wheel: f32 }
 );
@@ -210,7 +288,14 @@ ui_component!(
 );
 ui_component!(
     /// State singleton: what the interaction remembers between ticks.
-    UiInteraction { hot: u64, active: u64, focus: u64, prev_down: u32, prev_nav: u32 }
+    UiInteraction {
+        hot: u64,
+        active: u64,
+        focus: u64,
+        prev_down: u32,
+        prev_secondary: u32,
+        prev_nav: u32,
+    }
 );
 
 /// The natural size of every image asset the UI may show, by `AssetId`.
@@ -241,6 +326,7 @@ struct Source {
     label: Option<UiLabel>,
     shown: Option<UiShown>,
     transition: Option<u32>,
+    layer: Option<UiLayer>,
     text: String,
 }
 
@@ -290,6 +376,9 @@ fn build(
         let transition = e.try_get::<&UiTransition>(|t| t.ticks);
         let shown = e.try_get::<&UiShown>(|s| *s);
         let display = e.try_get::<&UiDisplay>(|d| d.none != 0);
+        let layer = e.try_get::<&UiLayer>(|l| *l);
+        let tooltip = e.try_get::<&UiTooltip>(|_| true);
+        let context = e.try_get::<&UiContext>(|c| c.on != 0);
         let parent = unsafe { sys::ecs_get_parent(w, entity) };
         let mut n = Node {
             id: sid,
@@ -334,6 +423,23 @@ fn build(
         }
         n.modal = modal.unwrap_or(false);
         n.hidden = display.unwrap_or(false);
+        n.context = context.unwrap_or(false);
+        n.hoverable = tooltip.unwrap_or(false);
+        if let Some(l) = layer {
+            n.hidden |= l.open == 0;
+            n.layer = Some(LayerNode {
+                anchor: l.anchor,
+                placement: Placement::from_u32(l.placement),
+                align: Edge::from_u32(l.align),
+                gap: l.gap,
+                point: [l.x, l.y],
+                flip: l.flags & 1 != 0,
+                match_width: l.flags & 2 != 0,
+                dismiss: l.flags & 4 != 0,
+            });
+            // Layers float above ordinary content unless told otherwise.
+            n.z += 1000;
+        }
         if let Some(i) = image {
             n.image = Some(ImageNode {
                 asset: i.asset,
@@ -422,6 +528,7 @@ fn build(
             label,
             shown,
             transition,
+            layer,
             text,
         });
     }
@@ -445,12 +552,14 @@ fn step(world: &WorldRef, strings: &RefCell<StringTable>, sizes: &RefCell<ImageS
         active: before.active,
         focus: before.focus,
         prev_down: before.prev_down != 0,
+        prev_secondary: before.prev_secondary != 0,
         prev_nav: before.prev_nav,
         scrolled: false,
     };
     let input = UiInput {
         pointer: (pointer.present != 0).then_some([pointer.x, pointer.y]),
-        down: pointer.down != 0,
+        down: pointer.down & 1 != 0,
+        secondary: pointer.down & 2 != 0,
         nav,
         ch,
         wheel: pointer.wheel,
@@ -515,6 +624,47 @@ fn step(world: &WorldRef, strings: &RefCell<StringTable>, sizes: &RefCell<ImageS
             e.set(UiLabel { text: id });
         }
     }
+    // Layers: a dismissed layer closes itself, and focus moves into a layer
+    // that opened and returns from one that closed.
+    let dismissed: Vec<u64> = events
+        .iter()
+        .filter(|e| e.kind == EventKind::Dismissed)
+        .map(|e| e.target)
+        .collect();
+    for (k, src) in sources.iter().enumerate() {
+        let Some(old) = src.layer else {
+            continue;
+        };
+        let mut next = old;
+        if dismissed.contains(&src.sid) {
+            next.open = 0;
+        }
+        let open = next.open != 0;
+        let was = old.was_open != 0;
+        if open && !was {
+            next.restore = state.focus;
+            if next.flags & 8 != 0 {
+                let want = if next.focus != 0 {
+                    next.focus
+                } else {
+                    crate::interact::first_focusable(&tree, k)
+                };
+                if want != 0 {
+                    state.focus = want;
+                }
+            }
+        } else if !open && was {
+            if next.restore != 0 && tree.nodes.iter().any(|n| n.id == next.restore) {
+                state.focus = next.restore;
+            }
+            next.restore = 0;
+        }
+        next.was_open = open as u32;
+        if next != old {
+            world.entity_from_id(src.entity).set(next);
+        }
+    }
+
     // Transitions: ease the shown colors towards what the state resolves to.
     // A node that has never been shown starts at its target (no animation on
     // the first frame).
@@ -554,6 +704,7 @@ fn step(world: &WorldRef, strings: &RefCell<StringTable>, sizes: &RefCell<ImageS
         active: state.active,
         focus: state.focus,
         prev_down: state.prev_down as u32,
+        prev_secondary: state.prev_secondary as u32,
         prev_nav: state.prev_nav,
     });
 
@@ -575,6 +726,8 @@ fn step(world: &WorldRef, strings: &RefCell<StringTable>, sizes: &RefCell<ImageS
             EventKind::TextChanged => e.emit(&UiTextChanged { target }),
             EventKind::Submitted => e.emit(&UiSubmitted { target }),
             EventKind::Focused => e.emit(&UiFocused { target }),
+            EventKind::Dismissed => e.emit(&UiDismissed { target }),
+            EventKind::ContextRequested(x, y) => e.emit(&UiContextRequested { target, x, y }),
         };
     }
 }
@@ -657,6 +810,18 @@ pub fn setup(world: &World, ecs: &Ecs) -> Result<(), String> {
         UiTransition => "sage::ui::Transition",
         UiShown => "sage::ui::Shown",
         UiDisplay => "sage::ui::Display",
+        UiLayer => "sage::ui::Layer",
+        UiContext => "sage::ui::Context",
+        UiTooltip => "sage::ui::Tooltip",
+        UiDismissed => "sage::ui::Dismissed",
+        UiSelect => "sage::ui::Select",
+        UiOption => "sage::ui::Option",
+        UiCombo => "sage::ui::Combo",
+        UiMenuItem => "sage::ui::MenuItem",
+        UiMenuTitle => "sage::ui::MenuTitle",
+        UiSelected => "sage::ui::Selected",
+        UiMenuChosen => "sage::ui::MenuChosen",
+        UiContextRequested => "sage::ui::ContextRequested",
         UiSlider => "sage::ui::Slider",
         UiClicked => "sage::ui::Clicked",
         UiToggled => "sage::ui::Toggled",

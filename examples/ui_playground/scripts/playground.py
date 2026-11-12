@@ -34,12 +34,9 @@ ui.start()
 # with the world (design doc 3.3).
 @component
 class Driver:
-    """The one entity that opens and closes the dialog."""
+    """The one entity that switches pages."""
 
-    dialog: Entity = None  # the open dialog, if any
-    cancel: Entity = None  # its buttons
-    ok: Entity = None
-    request: sage.u8 = 0  # 1 open, 2 close, 3 show page `arg`; handled after the tick's events
+    request: sage.u8 = 0  # 3 show page `arg`; handled after the tick's events
     arg: sage.u8 = 0
     page: sage.u8 = 0  # the page being shown
 
@@ -196,29 +193,23 @@ ui.add(T.Para, keys, text="TAB MOVES FOCUS. ENTER PRESSES. ARROWS ADJUST. PAGEUP
 
 # ---- behavior ---------------------------------------------------------------
 driver = world.entity()
-driver.set(Driver(None, None, None, 0, 0, 0))
+driver.set(Driver(0, 0, 0))
+
+
+# The dialog is built once, closed. It is a layer: a press on the backdrop
+# does nothing, keyboard focus stays inside, Escape closes it, and focus
+# returns to the button that opened it.
+dialog_back, dialog_box = ui.dialog()
+ui.add(T.Title, dialog_box, text="DIALOG")
+ui.add(T.Para, dialog_box, text="A MODAL: THE BACKDROP BLOCKS THE POINTER, AND KEYBOARD FOCUS STAYS INSIDE THIS BOX.")
+_row = ui.add(T.Row, dialog_box)
+dialog_cancel = ui.add(T.Secondary, _row, text="CANCEL").add(CloseButton)
+dialog_ok = ui.add(T.Primary, _row, text="OK").add(CloseButton)
 
 
 def dialog_buttons():
-    """The dialog's buttons, cancel then OK (none while it is closed)."""
-    d = driver.get(Driver)
-    return [] if d.dialog is None else [d.cancel, d.ok]
-
-
-def request(kind):
-    driver.get(Driver).request = kind
-
-
-def open_dialog():
-    back = ui.add(T.Backdrop, app, z=10, at=(-6, -6))
-    back.set(Modal(1))
-    box = ui.add(T.Dialog, back)
-    ui.add(T.Title, box, text="DIALOG")
-    ui.add(T.Para, box, text="A MODAL: THE BACKDROP BLOCKS THE POINTER, AND KEYBOARD FOCUS STAYS INSIDE THIS BOX.")
-    row = ui.add(T.Row, box)
-    cancel = ui.add(T.Secondary, row, text="CANCEL").add(CloseButton)
-    ok = ui.add(T.Primary, row, text="OK").add(CloseButton)
-    return back, cancel, ok
+    """The dialog's buttons, cancel then OK."""
+    return [dialog_cancel, dialog_ok]
 
 
 @world.observer(Clicked)
@@ -228,11 +219,11 @@ def on_click(c: Clicked):
         clicks.set(Counter(count))
         set_text(clicks, f"CLICKS: {count}")
     elif c.target == dialog_button.sid:
-        request(1)
+        ui.open(dialog_back)
     elif c.target in swatches:
         T.apply(swatches[c.target])
     elif world.lookup(c.target).has(CloseButton):
-        request(2)
+        ui.close(dialog_back)
 
 
 @world.observer(Toggled)
@@ -271,20 +262,12 @@ def advance(s: Slider):
 
 @world.system(phase=sage.PostUpdate)
 def apply_request(e: Entity, d: Driver):
-    # Opening and closing happen here, after the tick's events have been
-    # delivered, so an observer never changes the tree it is reacting to.
-    kind, dialog, cancel, ok, arg = d.request, d.dialog, d.cancel, d.ok, d.arg
-    if kind == 0:
+    # Switching pages happens here, after the tick's events have been
+    # delivered, so an observer never changes what it is reacting to.
+    if d.request != 3:
         return
-    if kind == 3:
-        for i, (page, tab) in enumerate(zip(page_roots, tab_buttons)):
-            page.set(Display(0 if i == arg else 1))
-            tab.set(Toggle(1 if i == arg else 0))
-        e.set(Driver(dialog, cancel, ok, 0, 0, arg))
-        return
-    if kind == 1 and dialog is None:
-        dialog, cancel, ok = open_dialog()
-    elif kind == 2 and dialog is not None:
-        dialog.destruct()
-        dialog = cancel = ok = None
-    e.set(Driver(dialog, cancel, ok, 0, 0, d.page))
+    arg = d.arg
+    for i, (page, tab) in enumerate(zip(page_roots, tab_buttons)):
+        page.set(Display(0 if i == arg else 1))
+        tab.set(Toggle(1 if i == arg else 0))
+    e.set(Driver(0, 0, arg))

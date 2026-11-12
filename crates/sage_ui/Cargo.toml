@@ -11,8 +11,8 @@ flecs_ecs.workspace = true
 sage_core.workspace = true
 sage_ecs_py.workspace = true
 sage_scene.workspace = true
+sage_script.workspace = true
 
 [dev-dependencies]
 pyo3.workspace = true
 sage_assets.workspace = true
-sage_script.workspace = true

@@ -16,7 +16,7 @@ use sage_ui::interact::{NAV_ACCEPT, NAV_BACKSPACE, NAV_NEXT, NAV_RIGHT};
 struct Ui {
     ecs: Ecs,
     script: Script,
-    _kit: Script,
+    _kit: Vec<Script>,
     world: World,
 }
 
@@ -69,7 +69,7 @@ impl Ui {
         let world = World::new();
         let ecs = Ecs::new(&world, 3, "game").unwrap();
         sage_ui::setup(&world, &ecs).unwrap();
-        let kit = ecs.load("ui", sage_ui::WIDGETS).unwrap();
+        let kit = sage_ui::load_kit(&ecs).unwrap();
         let script = ecs.load("game", src).unwrap();
         Ui {
             ecs,
@@ -607,7 +607,7 @@ fn styled() -> Ui {
     for (path, size) in [("art/logo.png", [32, 16]), ("art/sheet.png", [64, 32])] {
         sage_ui::register_image(&ecs, sage_assets::AssetId::of_path(path).0, size);
     }
-    let kit = ecs.load("ui", sage_ui::WIDGETS).unwrap();
+    let kit = sage_ui::load_kit(&ecs).unwrap();
     let script = ecs.load("game", STYLED).unwrap();
     Ui {
         ecs,

@@ -393,6 +393,23 @@ impl Entity {
         Ok((p != 0).then(|| Entity::new(self.reg, p)))
     }
 
+    /// The children of this entity (entities with a `ChildOf` pair to it),
+    /// ordered by StableId (creation order) so the result never depends on
+    /// Flecs's table order. Entities without a StableId come last, by id.
+    #[getter]
+    fn children(&self) -> PyResult<Vec<Entity>> {
+        let (reg, w) = self.live()?;
+        let mut it = unsafe { sys::ecs_children(w, self.id) };
+        let mut found: Vec<u64> = vec![];
+        while unsafe { sys::ecs_children_next(&mut it) } {
+            for i in 0..it.count as usize {
+                found.push(unsafe { *it.entities.add(i) });
+            }
+        }
+        found.sort_by_key(|&e| (reg.sid_of(e).unwrap_or(u64::MAX), e));
+        Ok(found.into_iter().map(|e| Entity::new(reg.id, e)).collect())
+    }
+
     /// Emits `event` (a component value or class) on this entity.
     /// Observers run before this returns.
     fn emit(&self, event: &Bound<'_, PyAny>) -> PyResult<()> {

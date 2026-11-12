@@ -21,8 +21,8 @@ pub use draw::draw;
 pub use ecs::{ImageSizes, frame, register_image, setup};
 pub use interact::{EventKind, UiEvent, UiInput, UiState, update};
 pub use layout::{
-    Align, Color, Direction, Fit, GradientNode, ImageNode, Justify, Node, Rect, ShadowNode, Size,
-    SliceNode, Tree, Widget, layout, text_size,
+    Align, Color, Direction, Edge, Fit, GradientNode, ImageNode, Justify, LayerNode, Node,
+    Placement, Rect, ShadowNode, Size, SliceNode, Tree, Widget, layout, text_size,
 };
 pub use style::{Resolved, States, Variant};
 
@@ -30,3 +30,19 @@ pub use style::{Resolved, States, Variant};
 /// input, and `world.ui` to build them. Load it as a script after [`setup`]:
 /// `ecs.load("ui", sage_ui::WIDGETS)`.
 pub const WIDGETS: &str = include_str!("../scripts/widgets.py");
+
+/// Popups, dialogs, tooltips, drop-downs, combo boxes, menus and context
+/// menus (`ui.layer`, `ui.dialog`, `ui.tooltip`, `ui.select`, `ui.combo`,
+/// `ui.menu_bar`, `ui.context_menu`). Loaded after [`WIDGETS`].
+pub const POPUPS: &str = include_str!("../scripts/popups.py");
+
+/// Every kit script, in load order, by name.
+pub const KIT: &[(&str, &str)] = &[("ui", WIDGETS), ("ui_popups", POPUPS)];
+
+/// Loads the whole widget kit into the world `ecs` is bound to. Keep the
+/// returned scripts alive as long as the world runs.
+pub fn load_kit(ecs: &sage_ecs_py::Ecs) -> Result<Vec<sage_script::Script>, String> {
+    KIT.iter()
+        .map(|(name, source)| ecs.load(name, source).map_err(|e| e.0))
+        .collect()
+}

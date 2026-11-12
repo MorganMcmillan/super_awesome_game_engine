@@ -20,7 +20,10 @@ pub const SCRIPT: &str = include_str!("../scripts/playground.py");
 
 /// The pages loaded after the main script, by name. A page registers
 /// itself with `world.add_page`.
-pub const PAGES: &[(&str, &str)] = &[("style", include_str!("../scripts/pages/style.py"))];
+pub const PAGES: &[(&str, &str)] = &[
+    ("style", include_str!("../scripts/pages/style.py")),
+    ("popups", include_str!("../scripts/pages/popups.py")),
+];
 
 pub mod assets;
 
@@ -34,7 +37,7 @@ pub const CLEAR: [u8; 4] = [15, 13, 11, 255];
 /// Fields drop in order: the binding, the scripts, then the world.
 pub struct Playground {
     pub ecs: Ecs,
-    _kit: Script,
+    _kit: Vec<Script>,
     _theme: Script,
     script: Script,
     pages: Vec<Script>,
@@ -50,7 +53,7 @@ impl Playground {
             w: SCREEN[0],
             h: SCREEN[1],
         });
-        let kit = ecs.load("ui", sage_ui::WIDGETS).map_err(|e| e.0)?;
+        let kit = sage_ui::load_kit(&ecs)?;
         let theme = ecs.load("theme", THEME).map_err(|e| e.0)?;
         for (_, image) in assets::all().iter().map(|(p, id, i)| (p, (id, i))) {
             let (id, i) = image;
@@ -139,7 +142,7 @@ impl Playground {
             x: i.pointer.map_or(0.0, |p| p[0]),
             y: i.pointer.map_or(0.0, |p| p[1]),
             present: i.pointer.is_some() as u32,
-            down: i.down as u32,
+            down: i.down as u32 | (i.secondary as u32) << 1,
             wheel: i.wheel,
         });
         self.world.set(UiNav { bits: i.nav });

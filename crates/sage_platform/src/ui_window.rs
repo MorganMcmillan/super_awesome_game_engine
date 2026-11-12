@@ -13,8 +13,8 @@ use std::time::{Duration, Instant};
 use sage_assets::Image;
 use sage_core::TICK_DT;
 use sage_core::host::{
-    NAV_ACCEPT, NAV_BACKSPACE, NAV_DELETE, NAV_DOWN, NAV_END, NAV_HOME, NAV_LEFT, NAV_NEXT,
-    NAV_PAGE_DOWN, NAV_PAGE_UP, NAV_PREV, NAV_RIGHT, NAV_UP, UiFrame,
+    NAV_ACCEPT, NAV_BACKSPACE, NAV_CANCEL, NAV_DELETE, NAV_DOWN, NAV_END, NAV_HOME, NAV_LEFT,
+    NAV_NEXT, NAV_PAGE_DOWN, NAV_PAGE_UP, NAV_PREV, NAV_RIGHT, NAV_UP, UiFrame,
 };
 use sdl3::event::{Event, WindowEvent};
 use sdl3::keyboard::{KeyboardState, Keycode, Scancode};
@@ -31,6 +31,8 @@ pub struct UiTickInput {
     pub pointer: Option<[f32; 2]>,
     /// The left mouse button is held.
     pub down: bool,
+    /// The right mouse button is held.
+    pub secondary: bool,
     /// `NAV_*` bits for this tick (with key repeat applied).
     pub nav: u32,
     /// A character typed this tick (one per tick; the rest wait).
@@ -111,6 +113,7 @@ fn keys_down(keys: &KeyboardState) -> Vec<(bool, u32, bool)> {
             NAV_ACCEPT,
             false,
         ),
+        (key(Scancode::Escape), NAV_CANCEL, false),
         (key(Scancode::Left), NAV_LEFT, true),
         (key(Scancode::Right), NAV_RIGHT, true),
         (key(Scancode::Up), NAV_UP, true),
@@ -133,6 +136,7 @@ pub struct UiEvents {
     pub mouse: [f32; 2],
     pub inside: bool,
     pub down: bool,
+    pub secondary: bool,
     wheel: f32,
     typed: VecDeque<char>,
 }
@@ -142,11 +146,18 @@ impl UiEvents {
     /// closed, or Escape).
     pub fn handle(&mut self, event: &Event) -> bool {
         match event {
-            Event::Quit { .. }
-            | Event::KeyDown {
-                keycode: Some(Keycode::Escape),
+            // Escape belongs to the UI (it closes popups); a window is closed
+            // with its close button, or Ctrl+Q.
+            Event::Quit { .. } => return true,
+            Event::KeyDown {
+                keycode: Some(Keycode::Q),
+                keymod,
                 ..
-            } => return true,
+            } if keymod
+                .intersects(sdl3::keyboard::Mod::LCTRLMOD | sdl3::keyboard::Mod::RCTRLMOD) =>
+            {
+                return true;
+            }
             Event::MouseMotion { x, y, .. } => {
                 self.mouse = [*x, *y];
                 self.inside = true;
@@ -165,6 +176,20 @@ impl UiEvents {
                 mouse_btn: MouseButton::Left,
                 ..
             } => self.down = false,
+            Event::MouseButtonDown {
+                mouse_btn: MouseButton::Right,
+                x,
+                y,
+                ..
+            } => {
+                self.mouse = [*x, *y];
+                self.inside = true;
+                self.secondary = true;
+            }
+            Event::MouseButtonUp {
+                mouse_btn: MouseButton::Right,
+                ..
+            } => self.secondary = false,
             // SDL's wheel is positive away from the user (scroll up); the UI
             // counts positive as content moving down.
             Event::MouseWheel { y, .. } => self.wheel -= *y,
@@ -185,6 +210,7 @@ impl UiEvents {
         UiTickInput {
             pointer: self.inside.then(|| to_ui(self.mouse)),
             down: self.down,
+            secondary: self.secondary,
             nav,
             ch: self.typed.pop_front(),
             wheel: std::mem::take(&mut self.wheel),
@@ -390,7 +416,7 @@ mod tests {
     }
 
     #[test]
-    fn other_buttons_are_ignored_and_escape_or_close_quits() {
+    fn the_right_button_is_secondary_and_ctrl_q_or_close_quits() {
         let mut e = UiEvents::default();
         let right = Event::MouseButtonDown {
             timestamp: 0,
@@ -402,7 +428,8 @@ mod tests {
             y: 1.0,
         };
         assert!(!e.handle(&right));
-        assert!(!e.down && !e.inside);
+        assert!(!e.down, "the right button is not the primary one");
+        assert!(e.secondary && e.inside, "it is the secondary button");
         let esc = Event::KeyDown {
             timestamp: 0,
             window_id: 0,
@@ -413,7 +440,21 @@ mod tests {
             which: 0,
             raw: 0,
         };
-        assert!(e.handle(&esc));
+        assert!(
+            !e.handle(&esc),
+            "Escape belongs to the UI now, it does not quit"
+        );
+        let ctrl_q = Event::KeyDown {
+            timestamp: 0,
+            window_id: 0,
+            keycode: Some(Keycode::Q),
+            scancode: Some(Scancode::Q),
+            keymod: sdl3::keyboard::Mod::LCTRLMOD,
+            repeat: false,
+            which: 0,
+            raw: 0,
+        };
+        assert!(e.handle(&ctrl_q));
         assert!(e.handle(&Event::Quit { timestamp: 0 }));
     }
 

@@ -30,6 +30,7 @@ pub struct UiState {
     pub active: u64,
     pub focus: u64,
     pub prev_down: bool,
+    pub prev_secondary: bool,
     pub prev_nav: u32,
     /// Output of the last `update`: some scroll offset changed, so the tree
     /// needs another `layout` before it is drawn. Not carried between ticks.
@@ -42,6 +43,8 @@ pub struct UiInput {
     pub pointer: Option<[f32; 2]>,
     /// The primary button is held.
     pub down: bool,
+    /// The secondary (right) button is held.
+    pub secondary: bool,
     /// `NAV_*` bits held this tick.
     pub nav: u32,
     /// A character typed this tick.
@@ -59,6 +62,11 @@ pub enum EventKind {
     TextChanged,
     Submitted,
     Focused,
+    /// A layer closed itself: a press outside it, or Escape.
+    Dismissed,
+    /// A secondary press over a node that provides a context menu, at this
+    /// position.
+    ContextRequested(f32, f32),
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -77,7 +85,7 @@ fn interactive(w: Widget) -> bool {
 pub fn hit_test(tree: &Tree, order: &[usize], p: [f32; 2]) -> Option<usize> {
     order.iter().rev().copied().find(|&i| {
         let n = &tree.nodes[i];
-        !matches!(n.widget, Widget::None | Widget::Meter)
+        (!matches!(n.widget, Widget::None | Widget::Meter) || n.hoverable)
             && n.rect.contains(p)
             && n.clip.is_none_or(|c| c.contains(p))
     })
@@ -161,6 +169,72 @@ fn reveal(tree: &mut Tree, i: usize) -> bool {
         at = scroll_ancestor(tree, a);
     }
     moved
+}
+
+/// The StableId of the first focusable, enabled node inside the subtree of
+/// node `root` (draw order, then `tab`), or 0.
+pub fn first_focusable(tree: &Tree, root: usize) -> u64 {
+    let order = tree.draw_order();
+    tab_order(tree, &order)
+        .into_iter()
+        .find(|&i| within(tree, i, root))
+        .map_or(0, |i| tree.nodes[i].id)
+}
+
+/// The root of the subtree node `i` is in.
+fn root_of(tree: &Tree, i: usize) -> usize {
+    let mut at = i;
+    for _ in 0..64 {
+        match parent_of(tree, at) {
+            Some(p) => at = p,
+            None => break,
+        }
+    }
+    at
+}
+
+/// The layers that are open (live roots with a `layer`), in draw order.
+fn open_layers(tree: &Tree, order: &[usize]) -> Vec<usize> {
+    order
+        .iter()
+        .copied()
+        .filter(|&i| tree.nodes[i].layer.is_some() && parent_of(tree, i).is_none())
+        .collect()
+}
+
+/// Is `p` inside layer `l` or inside a layer opened from it (a submenu,
+/// found through the anchor chain), or on `l`'s own anchor?
+fn in_layer_family(tree: &Tree, order: &[usize], l: usize, p: [f32; 2]) -> bool {
+    let layers = open_layers(tree, order);
+    let mut members = vec![l];
+    for _ in 0..8 {
+        let mut grew = false;
+        for &q in &layers {
+            if members.contains(&q) {
+                continue;
+            }
+            let anchor = tree.nodes[q].layer.and_then(|la| find(tree, la.anchor));
+            if anchor.is_some_and(|a| members.contains(&root_of(tree, a))) {
+                members.push(q);
+                grew = true;
+            }
+        }
+        if !grew {
+            break;
+        }
+    }
+    if tree.nodes[l]
+        .layer
+        .and_then(|la| find(tree, la.anchor))
+        .is_some_and(|a| tree.nodes[a].rect.contains(p))
+    {
+        return true;
+    }
+    order.iter().any(|&i| {
+        members.contains(&root_of(tree, i))
+            && tree.nodes[i].rect.contains(p)
+            && tree.nodes[i].clip.is_none_or(|c| c.contains(p))
+    })
 }
 
 fn find(tree: &Tree, id: u64) -> Option<usize> {
@@ -336,6 +410,53 @@ pub fn update(tree: &mut Tree, st: &mut UiState, input: &UiInput) -> Vec<UiEvent
         st.active = 0;
     }
 
+    // Layers close themselves on a press outside them (primary or
+    // secondary), and the topmost on Escape.
+    let secondary_press = input.secondary && !st.prev_secondary;
+    let layers = open_layers(tree, &order);
+    let mut dismissed = vec![];
+    if let Some(p) = input.pointer
+        && (press || secondary_press)
+    {
+        for &l in layers.iter().rev() {
+            if tree.nodes[l].layer.is_some_and(|la| la.dismiss)
+                && !in_layer_family(tree, &order, l, p)
+            {
+                dismissed.push(l);
+            }
+        }
+    }
+    let escape = input.nav & !st.prev_nav & NAV_CANCEL != 0;
+    if escape
+        && dismissed.is_empty()
+        && let Some(&l) = layers
+            .iter()
+            .rev()
+            .find(|&&l| tree.nodes[l].layer.is_some_and(|la| la.dismiss))
+    {
+        dismissed.push(l);
+    }
+    let escaped_a_layer = escape && !dismissed.is_empty();
+    for l in dismissed {
+        events.push(UiEvent {
+            target: tree.nodes[l].id,
+            kind: EventKind::Dismissed,
+        });
+    }
+    if secondary_press
+        && let Some(p) = input.pointer
+        && let Some(&i) = order.iter().rev().find(|&&i| {
+            tree.nodes[i].context
+                && tree.nodes[i].rect.contains(p)
+                && tree.nodes[i].clip.is_none_or(|c| c.contains(p))
+        })
+    {
+        events.push(UiEvent {
+            target: tree.nodes[i].id,
+            kind: EventKind::ContextRequested(p[0], p[1]),
+        });
+    }
+
     // The wheel scrolls the topmost scroll container under the pointer.
     let container_under = |tree: &Tree| {
         input.pointer.and_then(|p| {
@@ -450,7 +571,7 @@ pub fn update(tree: &mut Tree, st: &mut UiState, input: &UiInput) -> Vec<UiEvent
             }
         }
     }
-    if edge & NAV_CANCEL != 0 {
+    if edge & NAV_CANCEL != 0 && !escaped_a_layer {
         st.focus = 0;
     }
     // A widget focused by navigation scrolls into view.
@@ -461,6 +582,7 @@ pub fn update(tree: &mut Tree, st: &mut UiState, input: &UiInput) -> Vec<UiEvent
     }
 
     st.prev_down = input.down;
+    st.prev_secondary = input.secondary;
     st.prev_nav = input.nav;
     for n in &mut tree.nodes {
         n.hovered = n.id == st.hot && n.widget != Widget::None;
@@ -738,6 +860,7 @@ mod tests {
             active: 4242,
             focus: 4242,
             prev_down: false,
+            prev_secondary: false,
             prev_nav: 0,
             scrolled: false,
         };
@@ -997,5 +1120,163 @@ mod tests {
         t.nodes[5].modal = false;
         tick(&mut t, &mut st, &nav(NAV_NEXT));
         assert_ne!(st.focus, 91);
+    }
+
+    use crate::layout::{Edge, LayerNode, Placement};
+
+    fn layer_node(id: u64, anchor: u64, dismiss: bool) -> Node {
+        Node {
+            id,
+            width: Size::Fixed(40.0),
+            height: Size::Fixed(30.0),
+            layer: Some(LayerNode {
+                anchor,
+                placement: Placement::Below,
+                align: Edge::Start,
+                gap: 0.0,
+                point: [0.0; 2],
+                flip: true,
+                match_width: false,
+                dismiss,
+            }),
+            widget: Widget::Block,
+            ..Node::default()
+        }
+    }
+
+    fn dismissals(events: &[UiEvent]) -> Vec<u64> {
+        events
+            .iter()
+            .filter(|e| e.kind == EventKind::Dismissed)
+            .map(|e| e.target)
+            .collect()
+    }
+
+    /// The menu, with a popup layer (id 50) anchored to the first button.
+    fn menu_with_popup() -> Tree {
+        let mut t = menu();
+        t.nodes.push(layer_node(50, 10, true));
+        layout(&mut t, [100.0, 80.0]);
+        t
+    }
+
+    #[test]
+    fn a_press_outside_a_layer_dismisses_it_and_one_inside_or_on_its_anchor_does_not() {
+        let mut t = menu_with_popup();
+        let at_popup = {
+            let r = t.nodes.last().unwrap().rect;
+            [r.x + 5.0, r.y + 5.0]
+        };
+        let mut st = UiState::default();
+        // The popup is below button 10 (y 0..20): it covers y 20..50.
+        assert_eq!(at_popup[1], 25.0);
+        let e = tick(&mut t, &mut st, &pointer(at_popup[0], at_popup[1], true));
+        assert!(dismissals(&e).is_empty(), "a press inside it: {e:?}");
+        tick(&mut t, &mut st, &pointer(at_popup[0], at_popup[1], false));
+        // On the anchor (button 10): still not dismissed, so the button can toggle it.
+        let e = tick(&mut t, &mut st, &pointer(5.0, 5.0, true));
+        assert!(dismissals(&e).is_empty(), "{e:?}");
+        tick(&mut t, &mut st, &pointer(5.0, 5.0, false));
+        // Elsewhere: dismissed.
+        let e = tick(&mut t, &mut st, &pointer(80.0, 75.0, true));
+        assert_eq!(dismissals(&e), vec![50]);
+        // A layer that does not dismiss stays.
+        let mut t = menu_with_popup();
+        t.nodes.last_mut().unwrap().layer.as_mut().unwrap().dismiss = false;
+        let mut st = UiState::default();
+        let e = tick(&mut t, &mut st, &pointer(80.0, 75.0, true));
+        assert!(dismissals(&e).is_empty());
+    }
+
+    #[test]
+    fn escape_dismisses_only_the_topmost_layer_and_does_not_also_clear_focus() {
+        let mut t = menu_with_popup();
+        t.nodes.push(layer_node(51, 11, true));
+        t.nodes.last_mut().unwrap().z = 5;
+        layout(&mut t, [100.0, 80.0]);
+        let mut st = UiState {
+            focus: 12,
+            ..UiState::default()
+        };
+        let esc = |bits| UiInput {
+            nav: bits,
+            ..UiInput::default()
+        };
+        let e = tick(&mut t, &mut st, &esc(NAV_CANCEL));
+        assert_eq!(dismissals(&e), vec![51], "the higher layer first");
+        assert_eq!(
+            st.focus, 12,
+            "focus is not cleared when Escape closed a layer"
+        );
+        tick(&mut t, &mut st, &esc(0));
+        // With no dismissable layer, Escape clears focus as before.
+        let mut plain = menu();
+        let mut st = UiState {
+            focus: 12,
+            ..UiState::default()
+        };
+        tick(&mut plain, &mut st, &esc(NAV_CANCEL));
+        assert_eq!(st.focus, 0);
+    }
+
+    #[test]
+    fn a_submenu_keeps_its_parent_menu_open() {
+        // Popup 50 under button 10; submenu 51 anchored to a node inside 50.
+        let mut t = menu();
+        t.nodes.push(layer_node(50, 10, true));
+        let popup = t.nodes.len() - 1;
+        t.nodes.push(Node {
+            id: 60,
+            parent: Some(popup),
+            width: Size::Fixed(40.0),
+            height: Size::Fixed(10.0),
+            widget: Widget::Button,
+            ..Node::default()
+        });
+        t.nodes.push(layer_node(51, 60, true));
+        t.nodes.last_mut().unwrap().width = Size::Fixed(20.0);
+        layout(&mut t, [200.0, 120.0]);
+        let sub = t.nodes.iter().find(|n| n.id == 51).unwrap().rect;
+        let mut st = UiState::default();
+        let e = tick(&mut t, &mut st, &pointer(sub.x + 3.0, sub.y + 3.0, true));
+        assert!(dismissals(&e).is_empty(), "a press in the submenu: {e:?}");
+        // A press far from both closes both (the topmost first).
+        let mut st = UiState::default();
+        let e = tick(&mut t, &mut st, &pointer(190.0, 110.0, true));
+        let mut got = dismissals(&e);
+        got.sort();
+        assert_eq!(got, vec![50, 51]);
+    }
+
+    #[test]
+    fn a_secondary_press_over_a_context_node_requests_a_menu_at_the_pointer() {
+        let mut t = menu();
+        t.nodes[0].context = true;
+        let mut st = UiState::default();
+        let press = |x, y, secondary| UiInput {
+            pointer: Some([x, y]),
+            secondary,
+            ..UiInput::default()
+        };
+        let e = tick(&mut t, &mut st, &press(40.0, 50.0, true));
+        assert!(e.contains(&UiEvent {
+            target: 1,
+            kind: EventKind::ContextRequested(40.0, 50.0)
+        }));
+        // Held: no new request. Released and pressed again: another.
+        assert!(tick(&mut t, &mut st, &press(40.0, 50.0, true)).is_empty());
+        tick(&mut t, &mut st, &press(40.0, 50.0, false));
+        let e = tick(&mut t, &mut st, &press(41.0, 51.0, true));
+        assert!(
+            e.iter()
+                .any(|e| matches!(e.kind, EventKind::ContextRequested(..)))
+        );
+        // A node without the flag does not ask.
+        let mut plain = menu();
+        let mut st = UiState::default();
+        assert!(tick(&mut plain, &mut st, &press(40.0, 50.0, true)).is_empty());
+        // The first focusable inside a subtree is found for autofocus.
+        let t = menu_with_popup();
+        assert_eq!(first_focusable(&t, 0), 10);
     }
 }

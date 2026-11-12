@@ -22,7 +22,7 @@ pub const SCREEN: [f32; 2] = [160.0, 144.0];
 /// Fields drop in order: the binding, the scripts, then the world.
 pub struct Demo {
     pub ecs: Ecs,
-    _kit: Script,
+    _kit: Vec<Script>,
     menu: Script,
     pub world: World,
 }
@@ -36,7 +36,7 @@ impl Demo {
             w: SCREEN[0],
             h: SCREEN[1],
         });
-        let kit = ecs.load("ui", sage_ui::WIDGETS).map_err(|e| e.0)?;
+        let kit = sage_ui::load_kit(&ecs)?;
         let menu = ecs.load("menu", SCRIPT).map_err(|e| e.0)?;
         let demo = Demo {
             ecs,

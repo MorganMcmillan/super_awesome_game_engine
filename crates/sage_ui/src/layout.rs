@@ -183,6 +183,70 @@ pub fn rgba(c: Color) -> [u8; 4] {
     c.to_be_bytes()
 }
 
+/// Where a layer sits relative to its anchor.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum Placement {
+    /// Under the anchor.
+    #[default]
+    Below,
+    Above,
+    /// To the right of the anchor (a submenu).
+    Right,
+    Left,
+    /// At a point (a context menu at the pointer).
+    Point,
+}
+
+impl Placement {
+    pub fn from_u32(v: u32) -> Placement {
+        match v {
+            1 => Placement::Above,
+            2 => Placement::Right,
+            3 => Placement::Left,
+            4 => Placement::Point,
+            _ => Placement::Below,
+        }
+    }
+}
+
+/// Alignment along the anchor's edge.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum Edge {
+    #[default]
+    Start,
+    Center,
+    End,
+}
+
+impl Edge {
+    pub fn from_u32(v: u32) -> Edge {
+        match v {
+            1 => Edge::Center,
+            2 => Edge::End,
+            _ => Edge::Start,
+        }
+    }
+}
+
+/// A node that floats above the rest of the UI, placed next to an anchor
+/// (popups, dropdown lists, menus, tooltips) or at a point. It is a root of
+/// the tree; its position is computed after the rest has been laid out.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct LayerNode {
+    /// The StableId of the anchor node (0 for none: use `point`).
+    pub anchor: u64,
+    pub placement: Placement,
+    pub align: Edge,
+    pub gap: f32,
+    pub point: [f32; 2],
+    /// Move to the other side when it would not fit in the viewport.
+    pub flip: bool,
+    /// Be as wide as the anchor (a dropdown list under its button).
+    pub match_width: bool,
+    /// Closes (is dismissed) on a press outside it or on Escape.
+    pub dismiss: bool,
+}
+
 /// How an image fits the box it is in.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum Fit {
@@ -310,6 +374,14 @@ pub struct Node {
     pub min: f32,
     pub max: f32,
     pub step: f32,
+    /// Floating next to an anchor, above everything else.
+    pub layer: Option<LayerNode>,
+    /// The pointer can rest on this node (it becomes `hot`) even though it
+    /// is not a widget: a node with a tooltip.
+    pub hoverable: bool,
+    /// The node provides a context menu: a secondary press over it is
+    /// reported (`EventKind::ContextRequested`).
+    pub context: bool,
     /// A modal: while one exists, only its subtree can take keyboard focus.
     /// (Its `Block` widget or backdrop stops the pointer.) The topmost modal
     /// in draw order wins.
@@ -376,6 +448,9 @@ impl Default for Node {
             min: 0.0,
             max: 1.0,
             step: 0.0,
+            layer: None,
+            context: false,
+            hoverable: false,
             modal: false,
             wrap: false,
             scroll: false,
@@ -784,11 +859,108 @@ impl Pass<'_> {
     }
 }
 
+/// Positions every layer next to its anchor from the rectangles of the last
+/// pass. Returns true if any moved (or was resized), so the tree needs
+/// another pass.
+fn place_layers(tree: &mut Tree, viewport: [f32; 2]) -> bool {
+    let live = tree.live();
+    let mut changed = false;
+    for (i, &is_live) in live.iter().enumerate() {
+        let Some(l) = tree.nodes[i].layer else {
+            continue;
+        };
+        if !is_live || tree.nodes[i].parent.is_some() {
+            continue;
+        }
+        let anchor = if l.anchor != 0 {
+            tree.nodes
+                .iter()
+                .position(|n| n.id == l.anchor && n.id != tree.nodes[i].id)
+        } else {
+            None
+        };
+        let a = anchor.map(|k| tree.nodes[k].rect);
+        if l.match_width
+            && let Some(a) = a
+            && tree.nodes[i].width != Size::Fixed(a.w)
+        {
+            tree.nodes[i].width = Size::Fixed(a.w);
+            changed = true;
+        }
+        let (w, h) = (tree.nodes[i].rect.w, tree.nodes[i].rect.h);
+        let (vw, vh) = (viewport[0], viewport[1]);
+        // The box the layer is placed around: the anchor, or a point.
+        let r = a.unwrap_or(Rect {
+            x: l.point[0],
+            y: l.point[1],
+            w: 0.0,
+            h: 0.0,
+        });
+        let along = |start: f32, extent: f32, own: f32| match l.align {
+            Edge::Start => start,
+            Edge::Center => start + (extent - own) / 2.0,
+            Edge::End => start + extent - own,
+        };
+        let placement = if a.is_none() {
+            Placement::Point
+        } else {
+            l.placement
+        };
+        let (mut x, mut y) = match placement {
+            Placement::Below => (along(r.x, r.w, w), r.y + r.h + l.gap),
+            Placement::Above => (along(r.x, r.w, w), r.y - h - l.gap),
+            Placement::Right => (r.x + r.w + l.gap, along(r.y, r.h, h)),
+            Placement::Left => (r.x - w - l.gap, along(r.y, r.h, h)),
+            Placement::Point => (r.x + l.gap, r.y + l.gap),
+        };
+        if l.flip {
+            match placement {
+                Placement::Below if y + h > vh && r.y - h - l.gap >= 0.0 => y = r.y - h - l.gap,
+                Placement::Above if y < 0.0 && r.y + r.h + l.gap + h <= vh => y = r.y + r.h + l.gap,
+                Placement::Right if x + w > vw && r.x - w - l.gap >= 0.0 => x = r.x - w - l.gap,
+                Placement::Left if x < 0.0 && r.x + r.w + l.gap + w <= vw => x = r.x + r.w + l.gap,
+                Placement::Point => {
+                    if x + w > vw {
+                        x = (r.x - w).max(0.0);
+                    }
+                    if y + h > vh {
+                        y = (r.y - h).max(0.0);
+                    }
+                }
+                _ => {}
+            }
+        }
+        x = x.min(vw - w).max(0.0);
+        y = y.min(vh - h).max(0.0);
+        let at = Some([x, y]);
+        let moved = tree.nodes[i]
+            .absolute
+            .is_none_or(|p| (p[0] - x).abs() > 0.01 || (p[1] - y).abs() > 0.01);
+        if moved {
+            tree.nodes[i].absolute = at;
+            changed = true;
+        }
+    }
+    changed
+}
+
 /// Computes every node's `rect`, `clip`, `lines` and scroll state for a
-/// screen of `viewport` units. Wrapping text makes a node's height depend on
-/// its width, which the flow decides, so the pass repeats (at most four
-/// times) until the widths wrapping nodes got stop changing.
+/// screen of `viewport` units, then places layers next to their anchors.
+/// Wrapping text makes a node's height depend on its width, which the flow
+/// decides, so a pass repeats (at most four times) until the widths wrapping
+/// nodes got stop changing; layers repeat the whole thing (at most four
+/// times) until their positions stop changing, so a layer anchored to
+/// another layer settles too.
 pub fn layout(tree: &mut Tree, viewport: [f32; 2]) {
+    for _ in 0..4 {
+        layout_pass(tree, viewport);
+        if !place_layers(tree, viewport) {
+            break;
+        }
+    }
+}
+
+fn layout_pass(tree: &mut Tree, viewport: [f32; 2]) {
     let kids = tree.children();
     let roots = tree.roots();
     let count = tree.nodes.len();
@@ -1286,5 +1458,170 @@ mod tests {
             ],
         };
         assert_eq!(t.effective_fade(), vec![0.5, 0.75, 0.75]);
+    }
+
+    /// An anchor button at (30, 40) of size 20 x 10 on a 100 x 100 screen,
+    /// and a 30 x 20 layer anchored to it.
+    fn with_layer(l: LayerNode) -> Tree {
+        let mut t = Tree {
+            nodes: vec![
+                Node {
+                    id: 1,
+                    absolute: Some([30.0, 40.0]),
+                    ..fixed(None, 20.0, 10.0)
+                },
+                Node {
+                    id: 2,
+                    layer: Some(l),
+                    ..fixed(None, 30.0, 20.0)
+                },
+            ],
+        };
+        layout(&mut t, [100.0, 100.0]);
+        t
+    }
+
+    fn layer(placement: Placement, align: Edge) -> LayerNode {
+        LayerNode {
+            anchor: 1,
+            placement,
+            align,
+            gap: 2.0,
+            point: [0.0; 2],
+            flip: true,
+            match_width: false,
+            dismiss: true,
+        }
+    }
+
+    fn at(t: &Tree, i: usize) -> (f32, f32) {
+        (t.nodes[i].rect.x, t.nodes[i].rect.y)
+    }
+
+    #[test]
+    fn a_layer_sits_next_to_its_anchor() {
+        let below = with_layer(layer(Placement::Below, Edge::Start));
+        assert_eq!(
+            at(&below, 1),
+            (30.0, 52.0),
+            "under the anchor, left edges aligned, gap 2"
+        );
+        assert_eq!(
+            at(&with_layer(layer(Placement::Below, Edge::Center)), 1),
+            (25.0, 52.0)
+        );
+        assert_eq!(
+            at(&with_layer(layer(Placement::Below, Edge::End)), 1),
+            (20.0, 52.0)
+        );
+        assert_eq!(
+            at(&with_layer(layer(Placement::Above, Edge::Start)), 1),
+            (30.0, 18.0)
+        );
+        assert_eq!(
+            at(&with_layer(layer(Placement::Right, Edge::Start)), 1),
+            (52.0, 40.0)
+        );
+        // To the left would start at x = -2, off the screen, so it flips to the right.
+        assert_eq!(
+            at(&with_layer(layer(Placement::Left, Edge::Start)), 1),
+            (52.0, 40.0)
+        );
+        // From further right it fits on the left.
+        let mut far = with_layer(layer(Placement::Left, Edge::Start));
+        far.nodes[0].absolute = Some([60.0, 40.0]);
+        layout(&mut far, [100.0, 100.0]);
+        assert_eq!(at(&far, 1), (60.0 - 30.0 - 2.0, 40.0));
+    }
+
+    #[test]
+    fn a_layer_flips_to_the_other_side_when_it_would_not_fit_and_clamps_otherwise() {
+        // Anchor near the bottom: below would run off the screen, so it goes above.
+        let mut t = with_layer(layer(Placement::Below, Edge::Start));
+        t.nodes[0].absolute = Some([30.0, 85.0]);
+        layout(&mut t, [100.0, 100.0]);
+        assert_eq!(at(&t, 1), (30.0, 85.0 - 20.0 - 2.0), "flipped above");
+        // With flipping off it is clamped into the viewport instead.
+        let mut off = layer(Placement::Below, Edge::Start);
+        off.flip = false;
+        let mut t = with_layer(off);
+        t.nodes[0].absolute = Some([30.0, 85.0]);
+        layout(&mut t, [100.0, 100.0]);
+        assert_eq!(at(&t, 1).1, 80.0, "clamped: 100 - 20");
+        // Near the right edge it is pulled back in horizontally.
+        let mut t = with_layer(layer(Placement::Below, Edge::Start));
+        t.nodes[0].absolute = Some([90.0, 40.0]);
+        layout(&mut t, [100.0, 100.0]);
+        assert_eq!(at(&t, 1).0, 70.0);
+        // A submenu to the right flips to the left at the right edge.
+        let mut t = with_layer(layer(Placement::Right, Edge::Start));
+        t.nodes[0].absolute = Some([75.0, 40.0]);
+        layout(&mut t, [100.0, 100.0]);
+        assert_eq!(at(&t, 1).0, 75.0 - 30.0 - 2.0);
+    }
+
+    #[test]
+    fn a_layer_can_match_its_anchors_width_and_sit_at_a_point() {
+        let mut l = layer(Placement::Below, Edge::Start);
+        l.match_width = true;
+        let t = with_layer(l);
+        assert_eq!(t.nodes[1].rect.w, 20.0, "as wide as the anchor");
+        let mut p = layer(Placement::Point, Edge::Start);
+        p.anchor = 0;
+        p.point = [60.0, 70.0];
+        p.gap = 0.0;
+        let t = with_layer(p);
+        assert_eq!(at(&t, 1), (60.0, 70.0));
+        // A point near the corner opens up and to the left.
+        let mut p = layer(Placement::Point, Edge::Start);
+        p.anchor = 0;
+        p.point = [95.0, 95.0];
+        p.gap = 0.0;
+        let t = with_layer(p);
+        assert_eq!(at(&t, 1), (65.0, 75.0));
+    }
+
+    #[test]
+    fn a_layer_anchored_to_another_layer_settles() {
+        // A menu under a button, and a submenu to the right of the menu.
+        let mut t = Tree {
+            nodes: vec![
+                Node {
+                    id: 1,
+                    absolute: Some([10.0, 10.0]),
+                    ..fixed(None, 20.0, 10.0)
+                },
+                Node {
+                    id: 2,
+                    layer: Some(layer(Placement::Below, Edge::Start)),
+                    ..fixed(None, 30.0, 20.0)
+                },
+                Node {
+                    id: 3,
+                    layer: Some(LayerNode {
+                        anchor: 2,
+                        ..layer(Placement::Right, Edge::Start)
+                    }),
+                    ..fixed(None, 25.0, 15.0)
+                },
+            ],
+        };
+        // The first layer's anchor is node 1.
+        t.nodes[1].layer.as_mut().unwrap().anchor = 1;
+        layout(&mut t, [200.0, 200.0]);
+        assert_eq!(at(&t, 1), (10.0, 22.0));
+        assert_eq!(
+            at(&t, 2),
+            (10.0 + 30.0 + 2.0, 22.0),
+            "next to the menu, wherever it ended up"
+        );
+    }
+
+    #[test]
+    fn a_closed_layer_takes_no_part() {
+        let mut t = with_layer(layer(Placement::Below, Edge::Start));
+        t.nodes[1].hidden = true;
+        layout(&mut t, [100.0, 100.0]);
+        assert!(!t.draw_order().contains(&1));
     }
 }

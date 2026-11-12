@@ -1092,3 +1092,30 @@ fn the_lenient_policy_repairs_missing_and_extra_fields() {
     assert_eq!(g.eval::<u64>("world.lookup(5).get(Player).points"), 4);
     assert_eq!(g.eval::<u64>("world.lookup(5).get(Player).lives"), 0);
 }
+
+#[test]
+fn children_are_listed_in_stable_id_order() {
+    let g = Game::new(&src(r#"
+childof = world.lookup_path("flecs.core.ChildOf")
+parent = world.entity("p")
+kids = [world.entity(None, sid).add((childof, parent)) for sid in (40, 7, 23)]
+other = world.entity("other")
+orphan = world.entity(None, 5)
+nested = world.entity(None, 99).add((childof, kids[0]))
+"#));
+    assert_eq!(
+        g.eval::<Vec<u64>>("[c.sid for c in parent.children]"),
+        vec![7, 23, 40]
+    );
+    assert_eq!(
+        g.eval::<Vec<u64>>("[c.sid for c in kids[0].children]"),
+        vec![99]
+    );
+    assert_eq!(g.eval::<usize>("len(other.children)"), 0);
+    assert_eq!(g.eval::<usize>("len(nested.children)"), 0);
+    // Removing one shows at once.
+    assert_eq!(
+        g.eval::<Vec<u64>>("(kids[1].destruct(), [c.sid for c in parent.children])[1]"),
+        vec![23, 40]
+    );
+}
