@@ -39,10 +39,13 @@ from sage.ui import (
     History,
     Label,
     Paint,
+    Space,
+    WrapFlow,
     Rect,
     Scroll,
     Slider,
     States,
+    Cell,
     Rich,
     TextField,
     TextStyle,
@@ -51,6 +54,7 @@ from sage.ui import (
     Widget,
     ZIndex,
 )
+from sage.ui import Grid as GridC
 from sage.ui import Image as ImageC
 from sage.ui import Slice as SliceC
 
@@ -77,6 +81,16 @@ FIT = {"stretch": 0, "contain": 1, "cover": 2, "none": 3, "scale-down": 4}
 STATES = ("checked", "focus", "hover", "pressed", "disabled")
 
 
+class Pct:
+    """A size that is a percentage (0 to 100) of the parent's content box."""
+
+    def __init__(self, percent):
+        self.percent = float(percent)
+
+
+ALIGN_SELF = {"start": 1, "center": 2, "end": 3, "stretch": 4}
+
+
 class Fill:
     """A size that takes a share of what the parent has left."""
 
@@ -89,6 +103,8 @@ def _axis(size):
         return 0, 0.0
     if isinstance(size, Fill):
         return 2, size.weight
+    if isinstance(size, Pct):
+        return 3, size.percent
     return 1, float(size)
 
 
@@ -112,6 +128,7 @@ def _update(entity, cls, **fields):
 
 class Ui:
     fill = staticmethod(Fill)
+    pct = staticmethod(Pct)
     asset = staticmethod(asset)
     # Layout constants, for `direction=`, `align=` and `justify=`.
     COLUMN, ROW = COLUMN, ROW
@@ -167,8 +184,17 @@ class Ui:
             text=None, color=None, scale=None, wrap=None, z=None, at=None, enabled=None, tab=None,
             image=None, fit=None, tint=None, frame=None, cols=None, rows=None, slice=None,
             radius=None, shadow=None, gradient=None, fade=None, display=None, transition=None,
-            states=None):
-        """An instance of `prefab` under `parent` with the given style."""
+            states=None, margin=None, min_width=None, max_width=None, min_height=None, max_height=None,
+            aspect=None, align_self=None, offset=None, grid=None, cell=None, wrap_flow=None):
+        """An instance of `prefab` under `parent` with the given style.
+
+        Spacing: `margin` (a number, `(x, y)` or `(l, t, r, b)`), `min_*`/`max_*`
+        sizes, `aspect` (width / height), `align_self` ("start", "center",
+        "end", "stretch") and `offset=(dx, dy)` (moves it after layout).
+        Grids: `grid=("100 1fr auto", "auto", (col_gap, row_gap))` makes a
+        grid; `cell=(col, row, col_span, row_span)` places a child (1-based,
+        0 for the next free slot). `wrap_flow=gap` wraps children onto new
+        lines."""
         e = prefab.instantiate(name, sid)
         if parent is not None:
             e.add((self.childof, parent))
@@ -186,6 +212,29 @@ class Ui:
             flow.update(pad_left=left, pad_top=top, pad_right=right, pad_bottom=bottom)
         if flow:
             _update(e, Flow, **flow)
+        space = {}
+        if margin is not None:
+            left, top, right, bottom = _padding(margin)
+            space.update(margin_left=left, margin_top=top, margin_right=right, margin_bottom=bottom)
+        for key, val in (("min_width", min_width), ("max_width", max_width), ("min_height", min_height),
+                         ("max_height", max_height), ("aspect", aspect)):
+            if val is not None:
+                space[key] = float(val)
+        if align_self is not None:
+            space["align_self"] = ALIGN_SELF[align_self] if isinstance(align_self, str) else align_self
+        if offset is not None:
+            space.update(offset_x=float(offset[0]), offset_y=float(offset[1]))
+        if space:
+            _update(e, Space, **space)
+        if grid is not None:
+            tracks, rows_, *gaps = grid
+            cg, rg = (gaps[0] if isinstance(gaps[0], (tuple, list)) else (gaps[0], gaps[0])) if gaps else (0, 0)
+            e.set(GridC(self.world.intern(tracks), self.world.intern(rows_ or ""), float(cg), float(rg)))
+        if cell is not None:
+            col_, row_, *spans = cell
+            e.set(Cell(col_, row_, spans[0] if spans else 1, spans[1] if len(spans) > 1 else 1))
+        if wrap_flow is not None:
+            e.set(WrapFlow(1, float(wrap_flow)))
         paint = {k: v for k, v in (("fill", fill), ("border", border), ("border_width", border_width), ("accent", accent)) if v is not None}
         if paint:
             _update(e, Paint, **paint)
@@ -341,6 +390,30 @@ class Ui:
         e = self.add(self.Meter, parent, **style)
         e.set(Slider(float(value), float(low), float(high), 0.0))
         return e
+
+    def grid(self, parent, cols, rows="", gap=0, **style):
+        """A grid container. `cols` and `rows` are track lists: `"100 1fr auto"`
+        or a list like `[100, "1fr", "auto"]` (a number is a fixed size, `Nfr`
+        takes a share of what is left, `auto` fits the content; rows beyond
+        the list are auto). `gap` is a number or `(column gap, row gap)`.
+        Children fill the cells row by row; give one `cell=(col, row,
+        col_span, row_span)` to place it."""
+        join = lambda t: t if isinstance(t, str) else " ".join(str(v) for v in t)
+        return self.add(self.Panel, parent, grid=(join(cols), join(rows), gap), **style)
+
+    def list(self, parent, items, ordered=False, start=1, **style):
+        """`<ul>` and `<ol>`: a column of rows, each a marker (a bullet, or
+        the number) and the item's text. `items` are strings (or `(markup,)`
+        for rich text). Returns the list of row entities."""
+        col = self.add(self.Panel, parent, direction=COLUMN, gap=2, **style)
+        rows_ = []
+        for k, item in enumerate(items):
+            row = self.add(self.Panel, col, direction=ROW, gap=4, align=START, width=self.fill())
+            mark = ("%d." % (start + k)) if ordered else "-"
+            self.add(self.Text, row, text=mark, width=12 if ordered else 6)
+            self.rich(row, item, width=self.fill()) if isinstance(item, tuple) else self.add(self.Text, row, text=item, wrap=True, width=self.fill())
+            rows_.append(row)
+        return rows_
 
     def scroll(self, parent=None, **style):
         """A panel whose content scrolls along its flow direction (the wheel,

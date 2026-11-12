@@ -30,6 +30,16 @@ class Caret(Component):
     def __init__(self, pos: u32 = ...) -> None: ...
 
 
+class Cell(Component):
+    """Native component `sage.ui.Cell`."""
+
+    col: u32
+    row: u32
+    col_span: u32
+    row_span: u32
+    def __init__(self, col: u32 = ..., row: u32 = ..., col_span: u32 = ..., row_span: u32 = ...) -> None: ...
+
+
 class Changed(Component):
     """Native component `sage.ui.Changed`."""
 
@@ -124,6 +134,16 @@ class Focused(Component):
 
     target: u64
     def __init__(self, target: u64 = ...) -> None: ...
+
+
+class Grid(Component):
+    """Native component `sage.ui.Grid`."""
+
+    cols: u64
+    rows: u64
+    col_gap: f32
+    row_gap: f32
+    def __init__(self, cols: u64 = ..., rows: u64 = ..., col_gap: f32 = ..., row_gap: f32 = ...) -> None: ...
 
 
 class History(Component):
@@ -366,6 +386,24 @@ class Slider(Component):
     def __init__(self, value: f32 = ..., min: f32 = ..., max: f32 = ..., step: f32 = ...) -> None: ...
 
 
+class Space(Component):
+    """Native component `sage.ui.Space`."""
+
+    margin_left: f32
+    margin_top: f32
+    margin_right: f32
+    margin_bottom: f32
+    min_width: f32
+    min_height: f32
+    max_width: f32
+    max_height: f32
+    aspect: f32
+    align_self: u32
+    offset_x: f32
+    offset_y: f32
+    def __init__(self, margin_left: f32 = ..., margin_top: f32 = ..., margin_right: f32 = ..., margin_bottom: f32 = ..., min_width: f32 = ..., min_height: f32 = ..., max_width: f32 = ..., max_height: f32 = ..., aspect: f32 = ..., align_self: u32 = ..., offset_x: f32 = ..., offset_y: f32 = ...) -> None: ...
+
+
 class States(Component):
     """Native component `sage.ui.States`."""
 
@@ -467,6 +505,14 @@ class Widget(Component):
     tab: i32
     state: u32
     def __init__(self, kind: u32 = ..., enabled: u32 = ..., tab: i32 = ..., state: u32 = ...) -> None: ...
+
+
+class WrapFlow(Component):
+    """Native component `sage.ui.WrapFlow`."""
+
+    on: u32
+    gap: f32
+    def __init__(self, on: u32 = ..., gap: f32 = ...) -> None: ...
 
 
 class ZIndex(Component):

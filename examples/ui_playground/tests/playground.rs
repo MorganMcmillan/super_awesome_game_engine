@@ -1009,3 +1009,117 @@ fn rich_text_draws_styled_runs_and_a_link_click_navigates() {
     p.click_at([link_at[0] - 60.0, link_at[1] + 3.0]);
     assert_eq!(p.text("link_said"), "CLICKED: NOTHING");
 }
+
+// -- the layout page ------------------------------------------------------------
+
+fn laid() -> Playground {
+    let p = Playground::new().unwrap();
+    p.show_page("LAYOUT");
+    p
+}
+
+#[test]
+fn margins_limits_percentages_ratio_and_offsets_place_the_boxes() {
+    let p = laid();
+    let [ax, _, aw, _] = p.rect("margin_a");
+    let [bx, _, bw, _] = p.rect("margin_b");
+    assert_eq!(aw, 24.0);
+    assert_eq!(
+        bx - (ax + aw),
+        2.0 + 10.0,
+        "A's right margin plus B's left margin"
+    );
+    assert_eq!(bw, 24.0);
+    assert_eq!(
+        p.rect("limit_fill")[2],
+        40.0,
+        "a filling box stops at its max width"
+    );
+    let [_, _, w, _] = p.rect("percent_row");
+    let content = w - 4.0 - 2.0 * 1.0; // padding 2 each side, borders do not count
+    let (a, b) = (p.rect("pct_a")[2], p.rect("pct_b")[2]);
+    assert!(
+        (a - content * 0.25).abs() < 4.0 && (b - content * 0.5).abs() < 4.0,
+        "{a} {b} {content}"
+    );
+    let [_, _, rw, rh] = p.rect("ratio");
+    assert_eq!((rw, rh), (60.0, 30.0), "2:1");
+    let [sx, _, _, _] = p.rect("self_start");
+    let [cx, _, cw, _] = p.rect("self_center");
+    let [ex, _, ew, _] = p.rect("self_end");
+    let [gx, _, gw, _] = p.rect("selfs");
+    assert!(sx < cx && cx < ex);
+    assert!(
+        (ex + ew - (gx + gw)).abs() <= 3.0,
+        "end hugs the right edge"
+    );
+    assert!(
+        (cx + cw / 2.0 - (gx + gw / 2.0)).abs() <= 2.0,
+        "center is centered"
+    );
+    let [mx, _, _, _] = p.rect("model");
+    assert!(p.rect("shifted")[0] > mx + 12.0, "offset moved it right");
+}
+
+#[test]
+fn a_wrapping_row_breaks_into_lines_and_the_grid_spans_cells() {
+    let p = laid();
+    let ys: std::collections::BTreeSet<i32> = (0..10)
+        .map(|k| p.rect(&format!("chip_ids[{k}]"))[1] as i32)
+        .collect();
+    assert!(ys.len() >= 2, "ten chips do not fit one line: {ys:?}");
+    let [rx, _, rw, _] = p.rect("chips");
+    for k in 0..10 {
+        let [x, _, w, _] = p.rect(&format!("chip_ids[{k}]"));
+        assert!(x + w <= rx + rw + 1.0, "chip {k} stays inside the row");
+    }
+    // The grid: the wide cell spans columns 1 and 2, D is in column 3.
+    let [wx, wy, ww, _] = p.rect("cell_wide");
+    let [ax, ay, _, _] = p.rect("cell_a");
+    let [bx, _, bw, _] = p.rect("cell_b");
+    let [dx, dy, _, _] = p.rect("cell_d");
+    assert_eq!(wx, ax);
+    assert!(
+        (ww - (bx + bw - ax)).abs() <= 1.0,
+        "it covers columns 1 and 2"
+    );
+    assert!(wy > ay && dy == wy && dx > bx + bw - 1.0);
+}
+
+#[test]
+fn a_table_sorts_by_a_header_and_selects_a_row() {
+    let p = laid();
+    let names = |p: &Playground| p.eval::<Vec<String>>("[r[0] for r in ui.table_values(table)]");
+    assert_eq!(names(&p), ["ADA", "BO", "CY", "DI"]);
+    let header = |i: usize| format!("table.children[{i}]");
+    p.click(&header(1)); // LEVEL ascending: 7 9 12 31
+    assert_eq!(names(&p), ["BO", "DI", "ADA", "CY"]);
+    p.click(&header(1)); // descending
+    assert_eq!(names(&p), ["CY", "ADA", "DI", "BO"]);
+    p.click(&header(2)); // GOLD ascending (numbers sort as numbers: 85 < 340 < 560 < 1200)
+    assert_eq!(names(&p), ["CY", "ADA", "DI", "BO"]);
+    p.click(&header(0)); // NAME ascending
+    assert_eq!(names(&p), ["ADA", "BO", "CY", "DI"]);
+    // Selecting a row.
+    p.click("ui.table_cells(table)[2][1]");
+    assert_eq!(p.eval::<i32>("ui.table_selected(table)"), 2);
+    assert_eq!(p.text("table_said"), "SELECTED: CY");
+    p.click("ui.table_cells(table)[2][1]");
+    assert_eq!(p.eval::<i32>("ui.table_selected(table)"), -1);
+    assert_eq!(p.text("table_said"), "SELECTED: NONE");
+}
+
+#[test]
+fn lists_have_markers_and_wrapping_items() {
+    let p = laid();
+    let t = texts(&p);
+    assert!(t.contains(&"1.".to_string()) && t.contains(&"3.".to_string()));
+    assert_eq!(t.iter().filter(|s| *s == "-").count(), 3, "three bullets");
+    let [_, _, cw, _] = p.rect("bullets[0].parent");
+    let [x, _, w, _] = p.rect("bullets[1]");
+    let [cx, _, _, _] = p.rect("bullets[0].parent");
+    assert!(
+        x + w <= cx + cw + 1.0,
+        "the long item wraps inside the card"
+    );
+}

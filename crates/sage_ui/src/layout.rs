@@ -24,14 +24,18 @@ pub enum Size {
     Fixed(f32),
     /// A share of the space left in the parent's flow, by weight.
     Fill(f32),
+    /// A percentage (0 to 100) of the parent's content size on that axis. It
+    /// takes no space while the parent measures itself.
+    Percent(f32),
 }
 
 impl Size {
-    /// From the component form: kind 0 auto, 1 fixed, 2 fill.
+    /// From the component form: kind 0 auto, 1 fixed, 2 fill, 3 percent.
     pub fn from_parts(kind: u32, value: f32) -> Size {
         match kind {
             1 => Size::Fixed(value.max(0.0)),
             2 => Size::Fill(value.max(0.0)),
+            3 => Size::Percent(value.max(0.0)),
             _ => Size::Auto,
         }
     }
@@ -41,6 +45,7 @@ impl Size {
             Size::Auto => (0, 0.0),
             Size::Fixed(v) => (1, v),
             Size::Fill(w) => (2, w),
+            Size::Percent(p) => (3, p),
         }
     }
 }
@@ -102,6 +107,53 @@ impl Justify {
             _ => Justify::Start,
         }
     }
+}
+
+/// One row or column of a grid.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum Track {
+    /// As large as the largest cell in it.
+    Auto,
+    Fixed(f32),
+    /// A share of what the fixed and auto tracks leave, by weight.
+    Fr(f32),
+}
+
+/// Parses `"100 1fr auto 2fr"`: a number is a fixed size, `Nfr` a share,
+/// `auto` fits the content. Unreadable words are `auto`.
+pub fn parse_tracks(s: &str) -> Vec<Track> {
+    s.split_whitespace()
+        .map(|w| {
+            if let Some(f) = w.strip_suffix("fr") {
+                Track::Fr(f.parse::<f32>().unwrap_or(1.0).max(0.0))
+            } else if let Ok(v) = w.parse::<f32>() {
+                Track::Fixed(v.max(0.0))
+            } else {
+                Track::Auto
+            }
+        })
+        .collect()
+}
+
+/// A grid container: explicit column and row tracks (rows beyond the list
+/// are `auto`) and the gaps between them. Children are placed in order,
+/// row by row, or at their own `CellNode`.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct GridNode {
+    pub cols: Vec<Track>,
+    pub rows: Vec<Track>,
+    pub col_gap: f32,
+    pub row_gap: f32,
+}
+
+/// Where a grid child sits: 1-based column and row (0 for the next free
+/// slot) and how many tracks it covers (0 counts as 1).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct CellNode {
+    pub col: u32,
+    pub row: u32,
+    pub col_span: u32,
+    pub row_span: u32,
 }
 
 /// What a node does with the pointer and the keyboard.
@@ -397,6 +449,23 @@ pub struct Node {
     pub caret: usize,
     /// Text input: selection anchor, scroll, rules and undo history.
     pub field: FieldNode,
+    /// Space outside the box: left, top, right, bottom.
+    pub margin: [f32; 4],
+    /// Smallest and largest size per axis (0 for no limit).
+    pub size_min: [f32; 2],
+    pub size_max: [f32; 2],
+    /// Width divided by height; sizes an `auto` axis from the other one.
+    pub aspect: f32,
+    /// Overrides the parent's cross alignment for this node.
+    pub align_self: Option<Align>,
+    /// Shifts the node after layout without moving anything else.
+    pub offset: [f32; 2],
+    /// Children that do not fit along the flow continue on a new line.
+    pub flow_wrap: bool,
+    /// Space between those lines.
+    pub cross_gap: f32,
+    pub grid: Option<GridNode>,
+    pub cell: Option<CellNode>,
     /// Rich text: per-character styles and link targets (`text` is the plain
     /// text). Links make the node hoverable and clickable.
     pub rich: Option<crate::text::Rich>,
@@ -462,6 +531,16 @@ impl Default for Node {
             scroll_offset: 0.0,
             caret: 0,
             field: FieldNode::default(),
+            margin: [0.0; 4],
+            size_min: [0.0; 2],
+            size_max: [0.0; 2],
+            aspect: 0.0,
+            align_self: None,
+            offset: [0.0; 2],
+            flow_wrap: false,
+            cross_gap: 0.0,
+            grid: None,
+            cell: None,
             rich: None,
             hovered: false,
             pressed: false,
@@ -697,39 +776,266 @@ struct Pass<'a> {
     next: Vec<Option<f32>>,
 }
 
+/// Splits items with main sizes `mains` into lines that fit `avail` (greedy,
+/// `gap` between items). Without `avail` there is one line. Returns index
+/// ranges; an item wider than a line gets a line of its own.
+fn break_lines(mains: &[f32], avail: Option<f32>, gap: f32) -> Vec<std::ops::Range<usize>> {
+    let Some(avail) = avail else {
+        return std::iter::once(0..mains.len()).collect();
+    };
+    let mut out = vec![];
+    let (mut start, mut used) = (0, 0.0f32);
+    for (k, &m) in mains.iter().enumerate() {
+        let need = if k > start { used + gap + m } else { m };
+        if k > start && need > avail + 0.001 {
+            out.push(start..k);
+            start = k;
+            used = m;
+        } else {
+            used = need;
+        }
+    }
+    out.push(start..mains.len());
+    out
+}
+
+/// Where a grid child goes: its first column and row and how many it spans.
+struct Placed {
+    k: usize,
+    col: usize,
+    row: usize,
+    cs: usize,
+    rs: usize,
+}
+
 impl Pass<'_> {
+    fn clamp(&self, k: usize, axis: usize, v: f32) -> f32 {
+        let n = &self.tree.nodes[k];
+        let mut v = v;
+        if n.size_max[axis] > 0.0 {
+            v = v.min(n.size_max[axis]);
+        }
+        if n.size_min[axis] > 0.0 {
+            v = v.max(n.size_min[axis]);
+        }
+        v
+    }
+
+    /// The size a child asks of its parent on `axis`, margins included:
+    /// fixed sizes win over the measured one; fill takes its measured size;
+    /// a percentage asks for nothing.
+    fn ask(&self, k: usize, measured: [f32; 2], axis: usize) -> f32 {
+        let kn = &self.tree.nodes[k];
+        let v = match spec(kn, axis) {
+            Size::Fixed(f) => f,
+            Size::Percent(_) => 0.0,
+            Size::Auto | Size::Fill(_) => measured[axis],
+        };
+        self.clamp(k, axis, v) + kn.margin[axis] + kn.margin[2 + axis]
+    }
+
+    fn place_grid(&self, i: usize, flow: &[usize]) -> (Vec<Placed>, usize, usize) {
+        let g = self.tree.nodes[i].grid.clone().unwrap_or_default();
+        let ncols = g.cols.len().max(1);
+        let mut taken: std::collections::BTreeSet<(usize, usize)> = Default::default();
+        let mut out = vec![];
+        let (mut cr, mut cc) = (0usize, 0usize);
+        let mut nrows = g.rows.len();
+        for &k in flow {
+            let cell = self.tree.nodes[k].cell.unwrap_or_default();
+            let cs = (cell.col_span.max(1) as usize).min(ncols);
+            let rs = cell.row_span.max(1) as usize;
+            let (col, row) = if cell.col > 0 && cell.row > 0 {
+                (
+                    (cell.col as usize - 1).min(ncols - cs),
+                    cell.row as usize - 1,
+                )
+            } else {
+                // The next free slot, scanning row by row from the cursor.
+                let (mut r, mut c) = (cr, cc);
+                loop {
+                    if c + cs > ncols {
+                        r += 1;
+                        c = 0;
+                        continue;
+                    }
+                    let free =
+                        (0..rs).all(|dr| (0..cs).all(|dc| !taken.contains(&(r + dr, c + dc))));
+                    if free {
+                        break;
+                    }
+                    c += 1;
+                }
+                (cr, cc) = (r, c + cs);
+                (c, r)
+            };
+            for dr in 0..rs {
+                for dc in 0..cs {
+                    taken.insert((row + dr, col + dc));
+                }
+            }
+            nrows = nrows.max(row + rs);
+            out.push(Placed {
+                k,
+                col,
+                row,
+                cs,
+                rs,
+            });
+        }
+        (out, ncols, nrows)
+    }
+
+    /// Track sizes along one axis of a grid: fixed ones as given, `auto` and
+    /// `fr` ones as large as their cells ask (`bases`), and then the `fr`
+    /// ones grow to share `extent` when there is room.
+    fn tracks(
+        specs: &[Track],
+        count: usize,
+        asks: &[(usize, usize, f32)],
+        gap: f32,
+        extent: Option<f32>,
+    ) -> Vec<f32> {
+        let spec_of = |j: usize| specs.get(j).copied().unwrap_or(Track::Auto);
+        let mut size: Vec<f32> = (0..count)
+            .map(|j| match spec_of(j) {
+                Track::Fixed(v) => v,
+                _ => 0.0,
+            })
+            .collect();
+        // Single-track cells first, then the ones that span.
+        for pass in [false, true] {
+            for &(start, span, ask) in asks {
+                if (span > 1) != pass {
+                    continue;
+                }
+                let end = (start + span).min(count);
+                let have: f32 =
+                    size[start..end].iter().sum::<f32>() + gap * (span.saturating_sub(1)) as f32;
+                if ask > have {
+                    // The extra goes to the last track in the span that can grow.
+                    if let Some(j) = (start..end)
+                        .rev()
+                        .find(|&j| !matches!(spec_of(j), Track::Fixed(_)))
+                    {
+                        size[j] += ask - have;
+                    }
+                }
+            }
+        }
+        if let Some(extent) = extent {
+            let used: f32 = (0..count)
+                .filter(|&j| !matches!(spec_of(j), Track::Fr(_)))
+                .map(|j| size[j])
+                .sum::<f32>()
+                + gap * count.saturating_sub(1) as f32;
+            let weights: f32 = (0..count)
+                .map(|j| {
+                    if let Track::Fr(w) = spec_of(j) {
+                        w
+                    } else {
+                        0.0
+                    }
+                })
+                .sum();
+            let left = extent - used;
+            if weights > 0.0 && left > 0.0 {
+                for (j, sz) in size.iter_mut().enumerate() {
+                    if let Track::Fr(w) = spec_of(j) {
+                        *sz = sz.max(left * w / weights);
+                    }
+                }
+            }
+        }
+        size
+    }
+
+    /// The grid's track sizes for a content box `extent` (or its own measure).
+    fn grid_sizes(
+        &self,
+        i: usize,
+        plan: &(Vec<Placed>, usize, usize),
+        extent: [Option<f32>; 2],
+    ) -> [Vec<f32>; 2] {
+        let g = self.tree.nodes[i].grid.clone().unwrap_or_default();
+        let (placed, ncols, nrows) = plan;
+        let asks = |axis: usize| -> Vec<(usize, usize, f32)> {
+            placed
+                .iter()
+                .map(|p| {
+                    let (start, span) = if axis == 0 {
+                        (p.col, p.cs)
+                    } else {
+                        (p.row, p.rs)
+                    };
+                    (start, span, self.ask(p.k, self.intrinsic[p.k], axis))
+                })
+                .collect()
+        };
+        [
+            Pass::tracks(&g.cols, *ncols, &asks(0), g.col_gap, extent[0]),
+            Pass::tracks(&g.rows, *nrows, &asks(1), g.row_gap, extent[1]),
+        ]
+    }
+
     fn measure(&mut self, i: usize, depth: usize) -> [f32; 2] {
         if depth > MAX_DEPTH {
             return [0.0; 2];
         }
         let kids = self.kids[i].clone();
         let sizes: Vec<[f32; 2]> = kids.iter().map(|&k| self.measure(k, depth + 1)).collect();
+        for (&k, s) in kids.iter().zip(&sizes) {
+            self.intrinsic[k] = *s;
+        }
         let n = &self.tree.nodes[i];
+        let flow_kids: Vec<usize> = kids
+            .iter()
+            .copied()
+            .filter(|&k| self.tree.nodes[k].absolute.is_none())
+            .collect();
         let m = if n.direction == Direction::Row { 0 } else { 1 };
         let c = 1 - m;
-        let flow: Vec<[f32; 2]> = kids
-            .iter()
-            .zip(&sizes)
-            .filter(|&(&k, _)| self.tree.nodes[k].absolute.is_none())
-            .map(|(&k, s)| {
-                let kn = &self.tree.nodes[k];
-                let mut s = *s;
-                for (axis, v) in s.iter_mut().enumerate() {
-                    if let Size::Fixed(f) = spec(kn, axis) {
-                        *v = f;
-                    }
-                }
-                s
-            })
-            .collect();
-        let mut main: f32 = flow.iter().map(|s| s[m]).sum();
-        if flow.len() > 1 {
-            main += n.gap * (flow.len() - 1) as f32;
-        }
-        let cross = flow.iter().map(|s| s[c]).fold(0.0, f32::max);
         let mut content = [0.0; 2];
-        content[m] = main;
-        content[c] = cross;
+        if n.grid.is_some() {
+            let plan = self.place_grid(i, &flow_kids);
+            let g = n.grid.clone().unwrap_or_default();
+            let t = self.grid_sizes(i, &plan, [None, None]);
+            content[0] = t[0].iter().sum::<f32>() + g.col_gap * t[0].len().saturating_sub(1) as f32;
+            content[1] = t[1].iter().sum::<f32>() + g.row_gap * t[1].len().saturating_sub(1) as f32;
+        } else {
+            let items: Vec<[f32; 2]> = flow_kids
+                .iter()
+                .map(|&k| {
+                    [
+                        self.ask(k, self.intrinsic[k], 0),
+                        self.ask(k, self.intrinsic[k], 1),
+                    ]
+                })
+                .collect();
+            let pad_main = n.padding[m] + n.padding[2 + m];
+            let avail = if !n.flow_wrap {
+                None
+            } else if m == 0 {
+                self.hints[i]
+            } else if let Size::Fixed(h) = n.height {
+                Some((h - pad_main).max(0.0))
+            } else {
+                None
+            };
+            let mains: Vec<f32> = items.iter().map(|s| s[m]).collect();
+            let lines = break_lines(&mains, avail, n.gap);
+            let (mut main, mut cross) = (0.0f32, 0.0f32);
+            for l in &lines {
+                let part = &items[l.clone()];
+                let line_main: f32 = part.iter().map(|s| s[m]).sum::<f32>()
+                    + n.gap * part.len().saturating_sub(1) as f32;
+                main = main.max(line_main);
+                cross += part.iter().map(|s| s[c]).fold(0.0, f32::max);
+            }
+            cross += n.cross_gap * lines.len().saturating_sub(1) as f32;
+            content[m] = main;
+            content[c] = cross;
+        }
         let shown = match (n.wrap, self.hints[i]) {
             (true, Some(width)) => wrap_text(&n.text, n.text_scale, width),
             _ => n.text.clone(),
@@ -742,12 +1048,28 @@ impl Pass<'_> {
         [w, h]
     }
 
+    /// The size a child takes in a box of `avail` on one axis: its own size
+    /// when it has one, the box (less margins) when it fills or stretches.
+    fn resolve(&self, k: usize, axis: usize, avail: f32, stretch: bool) -> f32 {
+        let kn = &self.tree.nodes[k];
+        let room = (avail - kn.margin[axis] - kn.margin[2 + axis]).max(0.0);
+        let v = match spec(kn, axis) {
+            Size::Fixed(v) => v,
+            Size::Percent(p) => p / 100.0 * avail,
+            Size::Fill(_) => room,
+            Size::Auto if stretch => room,
+            Size::Auto => self.intrinsic[k][axis],
+        };
+        self.clamp(k, axis, v)
+    }
+
     fn arrange(&mut self, i: usize, r: Rect, clip: Option<Rect>, depth: usize) {
         if depth > MAX_DEPTH {
             return;
         }
-        let (x0, y0) = (r.x.round(), r.y.round());
-        let (x1, y1) = ((r.x + r.w).round(), (r.y + r.h).round());
+        let off = self.tree.nodes[i].offset;
+        let (x0, y0) = ((r.x + off[0]).round(), (r.y + off[1]).round());
+        let (x1, y1) = ((r.x + off[0] + r.w).round(), (r.y + off[1] + r.h).round());
         let rect = Rect {
             x: x0,
             y: y0,
@@ -771,8 +1093,7 @@ impl Pass<'_> {
         let origin = [content.x, content.y];
         let mut extent = [content.w, content.h];
         let m = if n.direction == Direction::Row { 0 } else { 1 };
-        let c = 1 - m;
-        if n.wrap {
+        if n.wrap || n.flow_wrap {
             self.next[i] = Some(content.w);
         }
         // A scroll container lays its children out in as much room as they
@@ -791,12 +1112,57 @@ impl Pass<'_> {
             .iter()
             .partition(|&&k| self.tree.nodes[k].absolute.is_none());
 
+        if n.grid.is_some() {
+            self.arrange_grid(i, &flow, origin, extent, scroll, m, child_clip, depth);
+        } else {
+            self.arrange_flow(i, &flow, origin, extent, scroll, child_clip, depth);
+        }
+        for k in absolute {
+            let [ax, ay] = self.tree.nodes[k].absolute.unwrap_or([0.0; 2]);
+            let w = self.resolve(k, 0, extent[0], false);
+            let h = self.resolve(k, 1, extent[1], false);
+            let mut at = [origin[0] + ax, origin[1] + ay];
+            at[m] -= scroll;
+            self.arrange(
+                k,
+                Rect {
+                    x: at[0],
+                    y: at[1],
+                    w,
+                    h,
+                },
+                child_clip,
+                depth + 1,
+            );
+        }
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn arrange_flow(
+        &mut self,
+        i: usize,
+        flow: &[usize],
+        origin: [f32; 2],
+        extent: [f32; 2],
+        scroll: f32,
+        child_clip: Option<Rect>,
+        depth: usize,
+    ) {
+        let n = self.tree.nodes[i].clone();
+        let m = if n.direction == Direction::Row { 0 } else { 1 };
+        let c = 1 - m;
+        // Each child's main size before sharing out the free space.
         let base: Vec<f32> = flow
             .iter()
-            .map(|&k| match spec(&self.tree.nodes[k], m) {
-                Size::Fixed(v) => v,
-                Size::Auto => self.intrinsic[k][m],
-                Size::Fill(_) => 0.0,
+            .map(|&k| {
+                let kn = &self.tree.nodes[k];
+                let v = match spec(kn, m) {
+                    Size::Fixed(v) => v,
+                    Size::Auto => self.intrinsic[k][m],
+                    Size::Fill(_) => 0.0,
+                    Size::Percent(p) => p / 100.0 * extent[m],
+                };
+                self.clamp(k, m, v)
             })
             .collect();
         let weights: Vec<f32> = flow
@@ -806,91 +1172,173 @@ impl Pass<'_> {
                 _ => 0.0,
             })
             .collect();
-        let weight_sum: f32 = weights.iter().sum();
-        let gaps = if flow.len() > 1 {
-            n.gap * (flow.len() - 1) as f32
-        } else {
-            0.0
-        };
-        let free = extent[m] - base.iter().sum::<f32>() - gaps;
-        let (mut offset, mut extra_gap) = (0.0, 0.0);
-        if weight_sum <= 0.0 {
-            let left = free.max(0.0);
-            match n.justify {
-                Justify::Start => {}
-                Justify::Center => offset = left / 2.0,
-                Justify::End => offset = left,
-                Justify::SpaceBetween => {
-                    if flow.len() > 1 {
-                        extra_gap = left / (flow.len() - 1) as f32;
+        let all_margins: Vec<[f32; 4]> = self.tree.nodes.iter().map(|n| n.margin).collect();
+        let margins = |k: usize, axis: usize| (all_margins[k][axis], all_margins[k][2 + axis]);
+        let outer: Vec<f32> = flow
+            .iter()
+            .zip(&base)
+            .map(|(&k, b)| b + margins(k, m).0 + margins(k, m).1)
+            .collect();
+        let avail = n.flow_wrap.then_some(extent[m]);
+        let lines = break_lines(&outer, avail, n.gap);
+        let single = lines.len() == 1 && !n.flow_wrap;
+        let mut line_origin = origin[c];
+        for l in lines {
+            let idxs: Vec<usize> = l.collect();
+            let gaps = n.gap * idxs.len().saturating_sub(1) as f32;
+            let weight_sum: f32 = idxs.iter().map(|&x| weights[x]).sum();
+            let free = extent[m] - idxs.iter().map(|&x| outer[x]).sum::<f32>() - gaps;
+            let (mut offset, mut extra_gap) = (0.0, 0.0);
+            if weight_sum <= 0.0 {
+                let left = free.max(0.0);
+                match n.justify {
+                    Justify::Start => {}
+                    Justify::Center => offset = left / 2.0,
+                    Justify::End => offset = left,
+                    Justify::SpaceBetween => {
+                        if idxs.len() > 1 {
+                            extra_gap = left / (idxs.len() - 1) as f32;
+                        }
                     }
                 }
             }
-        }
-        let mut pen = origin[m] + offset - scroll;
-        for (idx, &k) in flow.iter().enumerate() {
-            let main = if weight_sum > 0.0 && weights[idx] > 0.0 {
-                free.max(0.0) * weights[idx] / weight_sum
+            // The line's cross size: the whole box for a single line, else
+            // the tallest item on it.
+            let line_c = if single {
+                extent[c]
             } else {
-                base[idx]
+                idxs.iter()
+                    .map(|&x| {
+                        let k = flow[x];
+                        let kn = &self.tree.nodes[k];
+                        let own = match spec(kn, c) {
+                            Size::Fixed(v) => v,
+                            Size::Percent(p) => p / 100.0 * extent[c],
+                            Size::Fill(_) => 0.0,
+                            Size::Auto => self.intrinsic[k][c],
+                        };
+                        self.clamp(k, c, own) + margins(k, c).0 + margins(k, c).1
+                    })
+                    .fold(0.0, f32::max)
             };
-            let kn = &self.tree.nodes[k];
-            let cross = match spec(kn, c) {
-                Size::Fixed(v) => v,
-                Size::Fill(_) => extent[c],
-                Size::Auto => {
-                    if n.align == Align::Stretch {
-                        extent[c]
-                    } else {
-                        self.intrinsic[k][c]
+            let mut pen = origin[m] + offset - scroll;
+            for &x in &idxs {
+                let k = flow[x];
+                let (ms, me) = margins(k, m);
+                let (cs, ce) = margins(k, c);
+                let kn = &self.tree.nodes[k];
+                let align = kn.align_self.unwrap_or(n.align);
+                let aspect = kn.aspect;
+                let main_auto = matches!(spec(kn, m), Size::Auto);
+                let cross_auto = matches!(spec(kn, c), Size::Auto) && align != Align::Stretch;
+                let mut main = if weight_sum > 0.0 && weights[x] > 0.0 {
+                    self.clamp(k, m, free.max(0.0) * weights[x] / weight_sum)
+                } else {
+                    base[x]
+                };
+                let mut cross = self.resolve(k, c, line_c, align == Align::Stretch);
+                if aspect > 0.0 {
+                    if main_auto && !cross_auto {
+                        main = if m == 0 {
+                            cross * aspect
+                        } else {
+                            cross / aspect
+                        };
+                    } else if cross_auto && !main_auto {
+                        cross = if c == 0 { main * aspect } else { main / aspect };
                     }
                 }
-            };
-            let cross_pos = origin[c]
-                + match n.align {
-                    Align::Start | Align::Stretch => 0.0,
-                    Align::Center => (extent[c] - cross) / 2.0,
-                    Align::End => extent[c] - cross,
-                };
-            let mut kr = [0.0; 4];
-            kr[m] = pen;
-            kr[c] = cross_pos;
-            kr[2 + m] = main;
-            kr[2 + c] = cross;
-            self.arrange(
-                k,
-                Rect {
-                    x: kr[0],
-                    y: kr[1],
-                    w: kr[2],
-                    h: kr[3],
-                },
-                child_clip,
-                depth + 1,
-            );
-            pen += main + n.gap + extra_gap;
+                let space = line_c - cs - ce - cross;
+                let cross_pos = line_origin
+                    + cs
+                    + match align {
+                        Align::Start | Align::Stretch => 0.0,
+                        Align::Center => space / 2.0,
+                        Align::End => space,
+                    };
+                let mut kr = [0.0; 4];
+                kr[m] = pen + ms;
+                kr[c] = cross_pos;
+                kr[2 + m] = main;
+                kr[2 + c] = cross;
+                self.arrange(
+                    k,
+                    Rect {
+                        x: kr[0],
+                        y: kr[1],
+                        w: kr[2],
+                        h: kr[3],
+                    },
+                    child_clip,
+                    depth + 1,
+                );
+                pen += ms + main + me + n.gap + extra_gap;
+            }
+            line_origin += line_c + n.cross_gap;
         }
-        for k in absolute {
-            let [ax, ay] = self.tree.nodes[k].absolute.unwrap_or([0.0; 2]);
-            let kn = &self.tree.nodes[k];
-            let w = match kn.width {
-                Size::Fixed(v) => v,
-                Size::Fill(_) => extent[0],
-                Size::Auto => self.intrinsic[k][0],
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn arrange_grid(
+        &mut self,
+        i: usize,
+        flow: &[usize],
+        origin: [f32; 2],
+        extent: [f32; 2],
+        scroll: f32,
+        m: usize,
+        child_clip: Option<Rect>,
+        depth: usize,
+    ) {
+        let n = self.tree.nodes[i].clone();
+        let g = n.grid.clone().unwrap_or_default();
+        let plan = self.place_grid(i, flow);
+        let t = self.grid_sizes(i, &plan, [Some(extent[0]), Some(extent[1])]);
+        let starts = |sizes: &[f32], gap: f32| {
+            let mut at = vec![];
+            let mut pen = 0.0;
+            for s in sizes {
+                at.push(pen);
+                pen += s + gap;
+            }
+            at
+        };
+        let (cx, ry) = (starts(&t[0], g.col_gap), starts(&t[1], g.row_gap));
+        for p in &plan.0 {
+            let cw: f32 =
+                t[0][p.col..p.col + p.cs].iter().sum::<f32>() + g.col_gap * (p.cs - 1) as f32;
+            let rh: f32 = t[1][p.row..p.row + p.rs.min(t[1].len() - p.row)]
+                .iter()
+                .sum::<f32>()
+                + g.row_gap * (p.rs.min(t[1].len() - p.row) - 1) as f32;
+            let kn = &self.tree.nodes[p.k];
+            let align = kn.align_self.unwrap_or(n.align);
+            let (ml, mt, mb) = (kn.margin[0], kn.margin[1], kn.margin[3]);
+            let w = self.resolve(p.k, 0, cw, false);
+            let mut h = self.resolve(p.k, 1, rh, align == Align::Stretch);
+            let mut w2 = w;
+            let kn = &self.tree.nodes[p.k];
+            if kn.aspect > 0.0 {
+                if matches!(spec(kn, 1), Size::Auto) && align != Align::Stretch {
+                    h = w2 / kn.aspect;
+                } else if matches!(spec(kn, 0), Size::Auto) {
+                    w2 = h * kn.aspect;
+                }
+            }
+            let free = rh - mt - mb - h;
+            let y = match align {
+                Align::Start | Align::Stretch => 0.0,
+                Align::Center => free / 2.0,
+                Align::End => free,
             };
-            let h = match kn.height {
-                Size::Fixed(v) => v,
-                Size::Fill(_) => extent[1],
-                Size::Auto => self.intrinsic[k][1],
-            };
-            let mut at = [origin[0] + ax, origin[1] + ay];
+            let mut at = [origin[0] + cx[p.col] + ml, origin[1] + ry[p.row] + mt + y];
             at[m] -= scroll;
             self.arrange(
-                k,
+                p.k,
                 Rect {
                     x: at[0],
                     y: at[1],
-                    w,
+                    w: w2,
                     h,
                 },
                 child_clip,
@@ -1023,6 +1471,7 @@ fn layout_pass(tree: &mut Tree, viewport: [f32; 2]) {
             let size = |s: Size, own: f32, screen: f32| match s {
                 Size::Fixed(v) => v,
                 Size::Fill(_) => screen,
+                Size::Percent(p) => p / 100.0 * screen,
                 Size::Auto => own,
             };
             let w = size(n.width, pass.intrinsic[r][0], viewport[0]);
@@ -1664,5 +2113,216 @@ mod tests {
         t.nodes[1].hidden = true;
         layout(&mut t, [100.0, 100.0]);
         assert!(!t.draw_order().contains(&1));
+    }
+
+    fn root_col(w: f32, h: f32) -> Node {
+        fixed(None, w, h)
+    }
+
+    #[test]
+    fn margins_add_space_around_a_child_in_both_directions() {
+        let mut a = fixed(Some(0), 10.0, 10.0);
+        a.margin = [2.0, 3.0, 4.0, 5.0];
+        let b = fixed(Some(0), 10.0, 10.0);
+        let mut t = Tree {
+            nodes: vec![root_col(100.0, 100.0), a, b],
+        };
+        layout(&mut t, [100.0, 100.0]);
+        // Column: a starts after its top margin; b after a, its bottom margin.
+        assert_eq!(rects(&t)[1], [2.0, 3.0, 10.0, 10.0]);
+        assert_eq!(rects(&t)[2], [0.0, 18.0, 10.0, 10.0]);
+        // An auto parent includes the margins in its size.
+        let mut a = fixed(Some(0), 10.0, 10.0);
+        a.margin = [2.0, 3.0, 4.0, 5.0];
+        let mut t = Tree {
+            nodes: vec![node(None), a],
+        };
+        layout(&mut t, [100.0, 100.0]);
+        assert_eq!(rects(&t)[0][2..], [16.0, 18.0]);
+    }
+
+    #[test]
+    fn min_and_max_limit_a_size_whatever_asked_it() {
+        let mut fill = node(Some(0));
+        fill.width = Size::Fill(1.0);
+        fill.height = Size::Fixed(10.0);
+        fill.size_max = [30.0, 0.0];
+        let mut small = fixed(Some(0), 5.0, 5.0);
+        small.size_min = [20.0, 12.0];
+        let mut t = Tree {
+            nodes: vec![root_col(100.0, 100.0), fill, small],
+        };
+        layout(&mut t, [100.0, 100.0]);
+        assert_eq!(rects(&t)[1][2], 30.0, "a filling child stops at its max");
+        assert_eq!(
+            rects(&t)[2][2..],
+            [20.0, 12.0],
+            "a small child grows to its min"
+        );
+    }
+
+    #[test]
+    fn a_percentage_is_of_the_parents_content_box() {
+        let mut half = node(Some(0));
+        half.width = Size::Percent(50.0);
+        half.height = Size::Percent(25.0);
+        let mut t = Tree {
+            nodes: vec![
+                Node {
+                    padding: [10.0, 10.0, 10.0, 10.0],
+                    ..root_col(120.0, 100.0)
+                },
+                half,
+            ],
+        };
+        layout(&mut t, [200.0, 200.0]);
+        assert_eq!(rects(&t)[1], [10.0, 10.0, 50.0, 20.0]);
+    }
+
+    #[test]
+    fn aspect_ratio_sizes_an_auto_axis_from_the_other() {
+        let mut img = node(Some(0));
+        img.width = Size::Fixed(80.0);
+        img.aspect = 2.0;
+        let mut t = Tree {
+            nodes: vec![root_col(100.0, 100.0), img],
+        };
+        layout(&mut t, [100.0, 100.0]);
+        assert_eq!(rects(&t)[1][2..], [80.0, 40.0]);
+    }
+
+    #[test]
+    fn align_self_overrides_the_parents_cross_alignment() {
+        let a = fixed(Some(0), 10.0, 10.0);
+        let mut b = fixed(Some(0), 10.0, 10.0);
+        b.align_self = Some(Align::End);
+        let mut c = fixed(Some(0), 10.0, 10.0);
+        c.align_self = Some(Align::Center);
+        let mut t = Tree {
+            nodes: vec![root_col(100.0, 100.0), a, b, c],
+        };
+        layout(&mut t, [100.0, 100.0]);
+        let xs: Vec<f32> = rects(&t)[1..].iter().map(|r| r[0]).collect();
+        assert_eq!(xs, vec![0.0, 90.0, 45.0]);
+    }
+
+    #[test]
+    fn a_relative_offset_moves_the_node_and_its_children_but_not_its_siblings() {
+        let mut a = fixed(Some(0), 20.0, 10.0);
+        a.offset = [5.0, 7.0];
+        let inner = fixed(Some(1), 4.0, 4.0);
+        let b = fixed(Some(0), 20.0, 10.0);
+        let mut t = Tree {
+            nodes: vec![root_col(100.0, 100.0), a, inner, b],
+        };
+        layout(&mut t, [100.0, 100.0]);
+        assert_eq!(rects(&t)[1][..2], [5.0, 7.0]);
+        assert_eq!(rects(&t)[2][..2], [5.0, 7.0]);
+        assert_eq!(rects(&t)[3][..2], [0.0, 10.0], "the flow did not move");
+    }
+
+    #[test]
+    fn a_wrapping_row_starts_a_new_line_when_the_next_child_does_not_fit() {
+        let mut row = root_col(50.0, 100.0);
+        row.direction = Direction::Row;
+        row.flow_wrap = true;
+        row.gap = 2.0;
+        row.cross_gap = 3.0;
+        let kids: Vec<Node> = (0..5).map(|_| fixed(Some(0), 20.0, 10.0)).collect();
+        let mut nodes = vec![row];
+        nodes.extend(kids);
+        let mut t = Tree { nodes };
+        layout(&mut t, [100.0, 100.0]);
+        let r = rects(&t);
+        // 50 wide: two 20s and a 2 gap make 42; a third would need 64.
+        assert_eq!(r[1][..2], [0.0, 0.0]);
+        assert_eq!(r[2][..2], [22.0, 0.0]);
+        assert_eq!(r[3][..2], [0.0, 13.0]);
+        assert_eq!(r[5][..2], [0.0, 26.0]);
+    }
+
+    #[test]
+    fn an_auto_height_wrapping_row_grows_to_hold_its_lines() {
+        let mut row = node(None);
+        row.width = Size::Fixed(50.0);
+        row.direction = Direction::Row;
+        row.flow_wrap = true;
+        let mut nodes = vec![row];
+        nodes.extend((0..4).map(|_| fixed(Some(0), 20.0, 10.0)));
+        let mut t = Tree { nodes };
+        layout(&mut t, [100.0, 100.0]);
+        assert_eq!(rects(&t)[0][3], 20.0, "two lines of two");
+    }
+
+    fn grid_node(cols: &str, rows: &str, w: f32, h: Option<f32>) -> Node {
+        let mut g = node(None);
+        g.width = Size::Fixed(w);
+        if let Some(h) = h {
+            g.height = Size::Fixed(h);
+        }
+        g.grid = Some(GridNode {
+            cols: parse_tracks(cols),
+            rows: parse_tracks(rows),
+            col_gap: 2.0,
+            row_gap: 3.0,
+        });
+        g
+    }
+
+    #[test]
+    fn a_grid_sizes_fixed_auto_and_fractional_tracks() {
+        // 100 wide: a fixed 20, an auto (its widest cell, 30), then 1fr and
+        // 3fr share what is left: 100 - 20 - 30 - 6 gaps = 44.
+        let mut nodes = vec![grid_node("20 auto 1fr 3fr", "", 100.0, None)];
+        for w in [10.0, 30.0, 5.0, 5.0, 10.0, 12.0, 5.0, 5.0] {
+            nodes.push(fixed(Some(0), w, 8.0));
+        }
+        let mut t = Tree { nodes };
+        layout(&mut t, [200.0, 200.0]);
+        let r = rects(&t);
+        let xs: Vec<f32> = r[1..5].iter().map(|r| r[0]).collect();
+        assert_eq!(
+            xs,
+            vec![0.0, 22.0, 54.0, 67.0],
+            "fr columns are 11 and 33 wide"
+        );
+        // The second row starts below the first plus the row gap.
+        assert_eq!(r[5][..2], [0.0, 11.0]);
+        // Rows are as tall as their cells.
+        assert_eq!(r[0][3], 8.0 + 3.0 + 8.0);
+    }
+
+    #[test]
+    fn grid_children_span_tracks_and_may_be_placed_by_hand() {
+        let mut nodes = vec![grid_node("30 30 30", "10 10", 100.0, Some(30.0))];
+        let mut wide = node(Some(0));
+        wide.width = Size::Fill(1.0);
+        wide.height = Size::Fill(1.0);
+        wide.cell = Some(CellNode {
+            col: 1,
+            row: 1,
+            col_span: 2,
+            row_span: 1,
+        });
+        let mut placed = fixed(Some(0), 5.0, 5.0);
+        placed.cell = Some(CellNode {
+            col: 3,
+            row: 2,
+            col_span: 1,
+            row_span: 1,
+        });
+        let auto = fixed(Some(0), 5.0, 5.0);
+        nodes.extend([wide, placed, auto]);
+        let mut t = Tree { nodes };
+        layout(&mut t, [200.0, 200.0]);
+        let r = rects(&t);
+        assert_eq!(
+            r[1],
+            [0.0, 0.0, 62.0, 10.0],
+            "two columns and the gap between"
+        );
+        assert_eq!(r[2][..2], [64.0, 13.0]);
+        // The auto child fills the first free slot after the spanning one.
+        assert_eq!(r[3][..2], [64.0, 0.0]);
     }
 }

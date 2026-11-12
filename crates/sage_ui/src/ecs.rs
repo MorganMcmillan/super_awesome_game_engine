@@ -28,8 +28,8 @@ use sage_scene::StringTable;
 
 use crate::interact::{EventKind, UiInput, UiState, update};
 use crate::layout::{
-    Align, Direction, Edge, Fit, GradientNode, ImageNode, Justify, LayerNode, Node, Placement,
-    ShadowNode, Size, SliceNode, Tree, Widget, layout,
+    Align, CellNode, Direction, Edge, Fit, GradientNode, GridNode, ImageNode, Justify, LayerNode,
+    Node, Placement, ShadowNode, Size, SliceNode, Tree, Widget, layout, parse_tracks,
 };
 use crate::style::{Resolved, States, Variant, ease, resolve};
 
@@ -157,6 +157,42 @@ ui_component!(UiNavigate {
     target: u64,
     link: u64
 });
+ui_component!(
+    /// Spacing and limits, a style group: margins (left, top, right, bottom),
+    /// smallest and largest size (0 for none), `aspect` (width over height,
+    /// 0 for none), `align_self` (0 as the parent, 1 start, 2 center, 3 end,
+    /// 4 stretch), and a relative `offset` that moves the node after layout.
+    UiSpace {
+        margin_left: f32,
+        margin_top: f32,
+        margin_right: f32,
+        margin_bottom: f32,
+        min_width: f32,
+        min_height: f32,
+        max_width: f32,
+        max_height: f32,
+        aspect: f32,
+        align_self: u32,
+        offset_x: f32,
+        offset_y: f32
+    }
+);
+ui_component!(
+    /// Makes a node a grid. `cols` and `rows` are string ids of track lists
+    /// like `"100 1fr auto"` (a number is a fixed size, `Nfr` a share of what
+    /// is left, `auto` fits the content; rows past the list are auto).
+    UiGrid { cols: u64, rows: u64, col_gap: f32, row_gap: f32 }
+);
+ui_component!(
+    /// A grid child's cell: 1-based column and row (0 for the next free slot)
+    /// and the tracks it spans (0 counts as 1).
+    UiCell { col: u32, row: u32, col_span: u32, row_span: u32 }
+);
+ui_component!(
+    /// Children that do not fit along the flow continue on a new line, `gap`
+    /// apart (like `flex-wrap`).
+    UiWrapFlow { on: u32, gap: f32 }
+);
 ui_component!(UiToggle { on: u32 });
 ui_component!(UiSlider {
     value: f32,
@@ -484,6 +520,10 @@ fn build(
         let caret = e.try_get::<&UiCaret>(|c| *c);
         let field = e.try_get::<&UiTextField>(|c| *c);
         let rich = e.try_get::<&UiRich>(|c| *c);
+        let space = e.try_get::<&UiSpace>(|c| *c);
+        let grid = e.try_get::<&UiGrid>(|c| *c);
+        let cell = e.try_get::<&UiCell>(|c| *c);
+        let wrapflow = e.try_get::<&UiWrapFlow>(|c| *c);
         let hist = e.try_get::<&UiHistory>(|c| *c);
         let modal = e.try_get::<&UiModal>(|m| m.on != 0);
         let image = e.try_get::<&UiImage>(|i| *i);
@@ -525,6 +565,45 @@ fn build(
         if let Some(l) = label {
             text = strings.get(l.text).unwrap_or("").to_string();
             n.text = text.clone();
+        }
+        if let Some(sp) = space {
+            n.margin = [
+                sp.margin_left,
+                sp.margin_top,
+                sp.margin_right,
+                sp.margin_bottom,
+            ];
+            n.size_min = [sp.min_width, sp.min_height];
+            n.size_max = [sp.max_width, sp.max_height];
+            n.aspect = sp.aspect;
+            n.align_self = match sp.align_self {
+                1 => Some(Align::Start),
+                2 => Some(Align::Center),
+                3 => Some(Align::End),
+                4 => Some(Align::Stretch),
+                _ => None,
+            };
+            n.offset = [sp.offset_x, sp.offset_y];
+        }
+        if let Some(g) = grid {
+            n.grid = Some(GridNode {
+                cols: parse_tracks(strings.get(g.cols).unwrap_or("")),
+                rows: parse_tracks(strings.get(g.rows).unwrap_or("")),
+                col_gap: g.col_gap,
+                row_gap: g.row_gap,
+            });
+        }
+        if let Some(cl) = cell {
+            n.cell = Some(CellNode {
+                col: cl.col,
+                row: cl.row,
+                col_span: cl.col_span,
+                row_span: cl.row_span,
+            });
+        }
+        if let Some(w) = wrapflow {
+            n.flow_wrap = w.on != 0;
+            n.cross_gap = w.gap;
         }
         if let Some(r) = rich {
             let parsed = crate::text::parse_markup(strings.get(r.markup).unwrap_or(""));
@@ -984,6 +1063,10 @@ pub fn setup(world: &World, ecs: &Ecs) -> Result<(), String> {
         UiCaret => "sage::ui::Caret",
         UiTextField => "sage::ui::TextField",
         UiRich => "sage::ui::Rich",
+        UiSpace => "sage::ui::Space",
+        UiGrid => "sage::ui::Grid",
+        UiCell => "sage::ui::Cell",
+        UiWrapFlow => "sage::ui::WrapFlow",
         UiNavigate => "sage::ui::Navigate",
         UiHistory => "sage::ui::History",
         UiClipboard => "sage::ui::Clipboard",
@@ -1043,7 +1126,8 @@ pub fn setup(world: &World, ecs: &Ecs) -> Result<(), String> {
         UiDecor,
         UiSlice,
         UiStates,
-        UiTransition
+        UiTransition,
+        UiSpace
     );
     world.set(UiPointer::default());
     world.set(UiNav::default());

@@ -316,6 +316,8 @@ Decisions (all taken as recommended by Morgan, 2026-11-11):
 - **[Decided]** Video: no decoding for now. An image-sequence / sprite-sheet player comes first; real decoding is revisited later.
 - **[Decided]** Multi-window (editor tab tear-off) is deferred until the editor needs it.
 
+Progress (2026-11-11): phases P1 to P4 are implemented; `docs/milestone-3.md` lists each element with the test that proves it. The pure text engine (`sage_ui::text`: selection, word and line motion, wrapping, bounded undo history, number parsing, the rich-text markup) backs text fields, text areas, password and number fields. The layout engine gained margin, min and max, percentages, aspect ratio, align-self, relative offset, wrapping rows and grids with spans; tables, lists and headings are kit code on top. New components only (`Space`, `Grid`, `Cell`, `WrapFlow`, `TextField`, `History`, `Rich`, `Clipboard`); no existing component's schema changed, and no dependency was added. The text face is still the 5x7 bitmap, so bold is drawn by doubling the glyphs and italic does not exist until a TrueType crate is approved.
+
 ## 10. Platform and tooling scope
 
 ### 10.1 2D and 3D

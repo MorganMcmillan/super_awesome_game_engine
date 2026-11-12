@@ -37,8 +37,16 @@ pub const WIDGETS: &str = include_str!("../scripts/widgets.py");
 /// `ui.menu_bar`, `ui.context_menu`). Loaded after [`WIDGETS`].
 pub const POPUPS: &str = include_str!("../scripts/popups.py");
 
+/// The table (`ui.table`): a grid with sortable headers and selectable rows.
+/// Loaded after [`WIDGETS`].
+pub const TABLES: &str = include_str!("../scripts/tables.py");
+
 /// Every kit script, in load order, by name.
-pub const KIT: &[(&str, &str)] = &[("ui", WIDGETS), ("ui_popups", POPUPS)];
+pub const KIT: &[(&str, &str)] = &[
+    ("ui", WIDGETS),
+    ("ui_popups", POPUPS),
+    ("ui_tables", TABLES),
+];
 
 /// Loads the whole widget kit into the world `ecs` is bound to. Keep the
 /// returned scripts alive as long as the world runs.

@@ -24,6 +24,7 @@ pub const PAGES: &[(&str, &str)] = &[
     ("style", include_str!("../scripts/pages/style.py")),
     ("popups", include_str!("../scripts/pages/popups.py")),
     ("text", include_str!("../scripts/pages/text.py")),
+    ("layout", include_str!("../scripts/pages/layout.py")),
 ];
 
 pub mod assets;
