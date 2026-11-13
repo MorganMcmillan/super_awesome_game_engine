@@ -65,7 +65,26 @@ def shortcut(e, chord):
     return e
 
 
+def command(chord, name=None, sid=None):
+    """A shortcut with nothing to click: an entity that is only a key chord.
+    Pressing the chord emits `Clicked` on it, so a command is an observer:
+
+        save = ui.command("Ctrl+S", name="save")
+
+        @world.observer(Clicked)
+        def on_click(c: Clicked):
+            if c.target == save.sid: ...
+
+    It draws nothing and takes no space. Like any shortcut it is ignored
+    while a modal is open (it is outside the modal) and while `Enabled` is
+    off. Rebind it by setting `Shortcut` again."""
+    e = world.entity(name, sid)
+    e.set(Rect())
+    return shortcut(e, chord)
+
+
 ui.draggable, ui.drop_zone, ui.shortcut, ui.parse_chord = draggable, drop_zone, shortcut, parse_chord
+ui.command = command
 
 
 # ---- resizing ----------------------------------------------------------------------

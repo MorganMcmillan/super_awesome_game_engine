@@ -218,7 +218,8 @@ ui_component!(
     UiDropZone { kinds: u32, over: u32 }
 );
 ui_component!(
-    /// A key chord that acts as a click on this node. `key` is an upper-case
+    /// A key chord that acts as a click on this node (on a node with no
+    /// widget, a command: see `ui.command`). `key` is an upper-case
     /// ASCII letter or digit, or `0x100 + n - 1` for F`n`; `mods` is a bit set
     /// of 1 Ctrl, 2 Shift, 4 Alt.
     UiShortcut { key: u32, mods: u32 }

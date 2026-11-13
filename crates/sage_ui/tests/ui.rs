@@ -9,7 +9,7 @@ use sage_core::StateHasher;
 use sage_core::host::UiDraw;
 use sage_ecs_py::{Ecs, Policy};
 use sage_script::Script;
-use sage_ui::ecs::{UiNav, UiPointer, UiTextEntry};
+use sage_ui::ecs::{UiChord, UiNav, UiPointer, UiTextEntry};
 use sage_ui::interact::{NAV_ACCEPT, NAV_BACKSPACE, NAV_NEXT, NAV_RIGHT};
 
 /// Fields drop in order: the binding, the scripts, then the world.
@@ -177,6 +177,29 @@ fn clicking_a_button_emits_one_clicked_event() {
     assert!(ui.take_log().contains(&format!("('click', {sid})")));
     // No pointer, no events.
     ui.no_pointer();
+    ui.tick();
+    assert_eq!(ui.take_log(), "[]");
+}
+
+#[test]
+fn a_command_is_a_shortcut_entity_with_nothing_to_click() {
+    let ui = Ui::new(MENU);
+    ui.eval::<bool>("ui.command('Ctrl+K', name='palette') is not None");
+    ui.tick();
+    let chord = |key: u32, mods: u32| ui.world.set(UiChord { key, mods });
+    chord(b'K' as u32, 1);
+    ui.tick();
+    let sid = ui.eval::<u64>("world.lookup_path('palette').sid");
+    assert_eq!(ui.take_log(), format!("[('click', {sid})]"));
+    // The host sets the chord for one tick; another chord does nothing.
+    chord(b'J' as u32, 1);
+    ui.tick();
+    assert_eq!(ui.take_log(), "[]");
+    // A modal blocks it, since the command is outside the dialog.
+    ui.eval::<bool>("ui.open(ui.dialog('Sure?')[0]) is None or True");
+    ui.tick();
+    ui.take_log();
+    chord(b'K' as u32, 1);
     ui.tick();
     assert_eq!(ui.take_log(), "[]");
 }

@@ -399,6 +399,11 @@ fn tab_order(tree: &Tree, order: &[usize]) -> Vec<usize> {
 fn activate(tree: &mut Tree, i: usize, events: &mut Vec<UiEvent>) {
     let id = tree.nodes[i].id;
     match tree.nodes[i].widget {
+        // A node that is only a shortcut (`ui.command`): its chord is its click.
+        Widget::None if tree.nodes[i].shortcut.is_some() => events.push(UiEvent {
+            target: id,
+            kind: EventKind::Clicked,
+        }),
         Widget::Button | Widget::Label => events.push(UiEvent {
             target: id,
             kind: EventKind::Clicked,
@@ -2240,6 +2245,20 @@ mod tests {
         assert!(update(&mut t, &mut st, &chord(b'Z')).is_empty());
         t.nodes[1].enabled = false;
         assert!(update(&mut t, &mut st, &chord(b'S')).is_empty());
+    }
+
+    #[test]
+    fn a_shortcut_on_a_node_with_no_widget_is_a_command() {
+        let mut t = menu();
+        t.nodes[0].shortcut = Some([b'K' as u32, 1]);
+        assert_eq!(t.nodes[0].widget, Widget::None);
+        let mut st = UiState::default();
+        let input = UiInput {
+            chord: Some([b'K' as u32, 1]),
+            ..UiInput::default()
+        };
+        let e = update(&mut t, &mut st, &input);
+        assert_eq!(kinds(&e), vec![(t.nodes[0].id, EventKind::Clicked)]);
     }
 
     #[test]
