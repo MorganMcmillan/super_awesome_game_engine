@@ -54,3 +54,17 @@ def on(event):
         fn.__sage_event__ = event
         return fn
     return mark
+
+
+def position(x, y):
+    """Where a function's block stack sits on the block editor's canvas
+    (design doc 4.1). It has no effect when the game runs."""
+    for v in (x, y):
+        if isinstance(v, bool) or not isinstance(v, (int, float)):
+            raise TypeError("position takes two numbers")
+
+    def mark(fn):
+        fn.__sage_position__ = (x, y)
+        return fn
+
+    return mark

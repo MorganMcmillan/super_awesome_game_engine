@@ -9,10 +9,12 @@ members = [
     "crates/sage_assets",
     "crates/sage_scene",
     "crates/sage_ui",
+    "crates/sage_editor",
     "tools/shaderc",
     "examples/pong",
     "examples/ui_demo",
     "examples/ui_playground",
+    "examples/editor",
     "spikes/flecs_features",
     "spikes/pyo3_cost",
 ]
@@ -25,10 +27,12 @@ default-members = [
     "crates/sage_assets",
     "crates/sage_scene",
     "crates/sage_ui",
+    "crates/sage_editor",
     "tools/shaderc",
     "examples/pong",
     "examples/ui_demo",
     "examples/ui_playground",
+    "examples/editor",
     "spikes/flecs_features",
 ]
 
@@ -69,9 +73,27 @@ sage_platform = { path = "crates/sage_platform" }
 sage_assets = { path = "crates/sage_assets" }
 sage_scene = { path = "crates/sage_scene" }
 sage_ui = { path = "crates/sage_ui" }
+sage_editor = { path = "crates/sage_editor" }
 
 [profile.dev]
 # Flecs's C code and the Python interpreter are slow unoptimized; keep our own
 # code debuggable but optimize dependencies.
 [profile.dev.package."*"]
+opt-level = 2
+# The hot paths of a UI application (layout, interaction, drawing, the Python
+# binding, the editor core) are optimized in dev builds too: unoptimized they
+# made the editor feel sluggish under `cargo run`.
+[profile.dev.package.sage_ui]
+opt-level = 2
+[profile.dev.package.sage_platform]
+opt-level = 2
+[profile.dev.package.sage_assets]
+opt-level = 2
+[profile.dev.package.sage_ecs_py]
+opt-level = 2
+[profile.dev.package.sage_editor]
+opt-level = 2
+[profile.dev.package.sage_core]
+opt-level = 2
+[profile.dev.package.sage_scene]
 opt-level = 2

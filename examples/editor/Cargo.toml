@@ -1,0 +1,20 @@
+[package]
+name = "editor"
+description = "The editor (milestones M3 and M4): scene document, inspector, play in editor, Python text, and the block editor, all built from the engine's own UI entities."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+[dependencies]
+accesskit.workspace = true
+flecs_ecs.workspace = true
+pyo3.workspace = true
+sage_assets.workspace = true
+sage_core.workspace = true
+sage_ecs_py.workspace = true
+sage_editor.workspace = true
+sage_platform.workspace = true
+sage_scene.workspace = true
+sage_script.workspace = true
+sage_ui.workspace = true

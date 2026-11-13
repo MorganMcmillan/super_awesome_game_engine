@@ -33,17 +33,21 @@ def drop_zone(e, kinds=(0,)):
 
 
 _KEYS = {"CTRL": 1, "CONTROL": 1, "SHIFT": 2, "ALT": 4}
+_NAMED = {"UP": 0x200, "DOWN": 0x201, "LEFT": 0x202, "RIGHT": 0x203, "DELETE": 0x204}
 
 
 def parse_chord(text):
     """`"Ctrl+Shift+S"` -> `(key, mods)`: the key is an upper-case ASCII letter
-    or digit, or `0x100 + n - 1` for `F<n>`."""
+    or digit, `0x100 + n - 1` for `F<n>`, or 0x200 to 0x204 for Up, Down, Left,
+    Right and Delete (arrows need Ctrl or Alt)."""
     mods, key = 0, 0
     for part in text.replace(" ", "").upper().split("+"):
         if part in _KEYS:
             mods |= _KEYS[part]
         elif len(part) == 1 and part.isalnum():
             key = ord(part)
+        elif part in _NAMED:
+            key = _NAMED[part]
         elif part.startswith("F") and part[1:].isdigit() and 1 <= int(part[1:]) <= 12:
             key = 0x100 + int(part[1:]) - 1
         else:

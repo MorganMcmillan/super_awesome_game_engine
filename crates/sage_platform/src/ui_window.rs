@@ -243,7 +243,8 @@ pub fn modifier_bits(keys: &KeyboardState) -> u32 {
 }
 
 /// The chord a key press makes, if it is one: a letter or digit with Ctrl or
-/// Alt held, or a function key with any modifiers.
+/// Alt held, an arrow key with Ctrl or Alt, Delete, or a function key with any
+/// modifiers.
 pub fn chord_of(code: Keycode, keymod: sdl3::keyboard::Mod) -> Option<[u32; 2]> {
     use sdl3::keyboard::Mod;
     let mut mods = 0;
@@ -274,6 +275,21 @@ pub fn chord_of(code: Keycode, keymod: sdl3::keyboard::Mod) -> Option<[u32; 2]> 
     .position(|k| *k == code);
     if let Some(n) = function {
         return Some([CHORD_F1 + n as u32, mods]);
+    }
+    // Arrows with Ctrl or Alt, and Delete with anything (a text field also
+    // sees the Delete, so a script that binds it checks where focus is).
+    let named = match code {
+        Keycode::Up => Some(sage_core::host::CHORD_UP),
+        Keycode::Down => Some(sage_core::host::CHORD_DOWN),
+        Keycode::Left => Some(sage_core::host::CHORD_LEFT),
+        Keycode::Right => Some(sage_core::host::CHORD_RIGHT),
+        Keycode::Delete => Some(sage_core::host::CHORD_DELETE),
+        _ => None,
+    };
+    if let Some(k) = named
+        && (k == sage_core::host::CHORD_DELETE || mods & (CHORD_CTRL | CHORD_ALT) != 0)
+    {
+        return Some([k, mods]);
     }
     let raw: u32 = code as u32;
     let ascii = (0x20..0x7f)
@@ -451,6 +467,7 @@ fn show_file_dialog(
 /// Runs `app` in a window until it is closed or Escape is pressed (or
 /// `options.max_frames` frames were drawn). Needs the GPU renderer.
 pub fn run_ui_windowed<A: UiApp>(app: &mut A, options: &WindowOptions) -> Result<UiRun, String> {
+    crate::prepare_video();
     let sdl = sdl3::init().map_err(|e| e.to_string())?;
     let video = sdl.video().map_err(|e| e.to_string())?;
     let mut builder = video.window(&options.title, options.size.0, options.size.1);
@@ -859,5 +876,29 @@ mod tests {
         e.handle(&wheel(-0.5));
         assert_eq!(e.tick(0, id).wheel, -1.5);
         assert_eq!(e.tick(0, id).wheel, 0.0, "consumed");
+    }
+}
+
+#[cfg(test)]
+mod chord_tests {
+    use super::*;
+    use sdl3::keyboard::Mod;
+
+    #[test]
+    fn arrows_with_alt_or_ctrl_and_delete_are_chords_but_a_bare_arrow_is_navigation() {
+        use sage_core::host::{CHORD_ALT, CHORD_CTRL, CHORD_DELETE, CHORD_DOWN, CHORD_UP};
+        assert_eq!(
+            chord_of(Keycode::Up, Mod::LALTMOD),
+            Some([CHORD_UP, CHORD_ALT])
+        );
+        assert_eq!(
+            chord_of(Keycode::Down, Mod::LCTRLMOD),
+            Some([CHORD_DOWN, CHORD_CTRL])
+        );
+        assert_eq!(chord_of(Keycode::Up, Mod::NOMOD), None);
+        assert_eq!(
+            chord_of(Keycode::Delete, Mod::NOMOD),
+            Some([CHORD_DELETE, 0])
+        );
     }
 }

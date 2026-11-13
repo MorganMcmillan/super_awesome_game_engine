@@ -224,6 +224,17 @@ impl Ecs {
     /// Runs a script with `world` in its globals. Components, flecs modules,
     /// systems and observers it declares are registered as it runs.
     pub fn load(&self, name: &str, source: &str) -> Result<Script, ScriptError> {
+        self.load_with(name, source, vec![])
+    }
+
+    /// Like [`Ecs::load`], with more globals (a host object the script
+    /// talks to, such as the editor's document).
+    pub fn load_with(
+        &self,
+        name: &str,
+        source: &str,
+        extra: Vec<(String, Py<PyAny>)>,
+    ) -> Result<Script, ScriptError> {
         let world_obj = Python::attach(|py| {
             self.reg
                 .world_obj
@@ -239,7 +250,9 @@ impl Ecs {
         })
         .map_err(|e| Python::attach(|py| describe(py, &e)))?;
         self.reg.push_scope();
-        let result = Script::load_with(name, source, vec![("world".to_string(), world_obj)]);
+        let mut globals = vec![("world".to_string(), world_obj)];
+        globals.extend(extra);
+        let result = Script::load_with(name, source, globals);
         self.reg.pop_scope();
         self.reg.invalidate_views();
         Python::attach(|py| {

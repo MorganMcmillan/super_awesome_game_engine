@@ -121,6 +121,13 @@ pub const CHORD_ALT: u32 = 4;
 /// Key codes of a chord: letters and digits are their upper-case ASCII, the
 /// function keys F1 to F12 are `CHORD_F1 + n - 1`.
 pub const CHORD_F1: u32 = 0x100;
+/// Arrow keys and Delete as chord keys (a chord with Ctrl or Alt, or Delete
+/// alone): `CHORD_UP`, `CHORD_DOWN`, `CHORD_LEFT`, `CHORD_RIGHT`, `CHORD_DELETE`.
+pub const CHORD_UP: u32 = 0x200;
+pub const CHORD_DOWN: u32 = 0x201;
+pub const CHORD_LEFT: u32 = 0x202;
+pub const CHORD_RIGHT: u32 = 0x203;
+pub const CHORD_DELETE: u32 = 0x204;
 
 /// Text style bits (`UiDraw::Text::style`).
 pub const STYLE_BOLD: u8 = 1;

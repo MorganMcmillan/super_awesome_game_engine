@@ -97,7 +97,8 @@ The binding (`crates/sage_ecs_py`, `python/sage/ecs.py`) will be split out so th
 
 ### 4.1 Source of truth and round trip
 - **[Decided]** Python is the language. Blocks are a *view* of Python; text is the source of truth so no code is ever lost.
-- **[Leaning]** Use `libcst` (preserves comments and formatting) rather than `ast` for round trips.
+- **[Decided, 2026-11-13, Morgan]** Use `libcst` (preserves comments and formatting) rather than `ast` for round trips. Implemented in `python/sage/blocks.py` (M4, `docs/milestone-4.md`): edits rewrite the concrete syntax tree at the touched blocks, so everything else comes back byte for byte.
+- **[Decided, 2026-11-13, Morgan]** Comments are **sticky notes** joined to the block they sit above, and docstrings are notes on their function's hat. Moving or deleting a block takes its notes with it. A comment after a statement on the same line is kept and shown beside it (`trail`).
 - **Block positions:** `@game_engine.position(x, y)` decorators on top-level functions. Only the top of a stack needs coordinates (blocks inside are placed by snapping). Tradeoff: moving a script rewrites source (noisy diffs, merge conflicts). Alternative: sidecar layout file keyed by function name (cleaner diffs, can drift on rename). **[Leaning]** decorators for a solo sandbox; revisit if git/hand-editing matters. (`game_engine` is a placeholder name; see 15.)
 - **Stray stacks** (no trigger) are functions with no trigger decorator. Double-click runs the whole stack (same as Scratch). **[Open]** how to supply parameters (reuse last recorded event, use selected entity, or prompt), locals (a "run up to here" mode), and for system functions whether it runs on the selected entity or all matches.
 - **Unsupported Python:** **[Decided]** no raw-code escape block (it would be a hole that bypasses the guarantees). **[Leaning]** per-function lock: a function using an unsupported construct appears as a read-only, text-only stack while everything else stays block-editable. Frame the supported subset as a "language level" (cf. Racket's teaching languages), defined by what the kits need.
@@ -105,9 +106,10 @@ The binding (`crates/sage_ecs_py`, `python/sage/ecs.py`) will be split out so th
 - Blocks remove *syntax* errors, not *semantic* ones, so the saved effort goes into typed sockets and the "Why?" button.
 
 ### 4.2 Block shapes
+- **[Decided, 2026-11-13, Morgan]** `return`, `break` and `continue` have a flat bottom: nothing can be placed after them. **Keyboard access:** clicking a block selects it, Tab walks its expressions depth-first, Enter goes to the next block, Ctrl+B and Ctrl+E open the block and expression palettes, and multi-branch blocks highlight the bottom of an empty branch. Implemented in `examples/editor/scripts/editor.py`; shortcuts in `docs/milestone-4.md`.
 - Command (stack), reporter (round), predicate (angular), **type (square)**.
 - Shape enforces type; color is category (as in Scratch).
-- **[Open]** The type shape must be distinguishable from rectangular text-input slots and from command blocks (notched corners or distinct outline; don't rely on color alone).
+- **[Leaning, 2026-11-13, proposed in M4]** The type shape must be distinguishable from rectangular text-input slots and from command blocks (notched corners or distinct outline; don't rely on color alone). Implemented answer, for Morgan to confirm or replace: commands have a notch tab under them (none for `return`, `break`, `continue`); values are fully round; tests are square with a thin dark outline; types are square with a thick outline; text-input slots are dark rectangles inside a value. Outline and radius carry the difference, not color. True Scratch silhouettes would need the UI module to draw custom polygons for widgets.
 
 ### 4.3 Expressions
 - Lambdas and comprehensions: parameters appear as scoped chips usable only inside the expression; dropping one elsewhere shows a helpful message. Lambdas can still read enclosing variables (closures).
@@ -118,7 +120,8 @@ The binding (`crates/sage_ecs_py`, `python/sage/ecs.py`) will be split out so th
 - Validate every literal field with `ast.literal_eval`, so literals cannot smuggle arbitrary code. String interpolation uses `join`-style blocks.
 - Changing a literal's type follows cast rules (see exercise 3).
 - Compound literals (tuple, list, set, dict) are multi-line expression blocks that grow with a plus button. Tuples are fixed-size (no plus). Dicts render as two-column rows. Empty set vs empty dict are explicit blocks (text output must emit `set()`).
-- **[Open]** Element types for lists (list of numbers). Idea: render lists of lists as an editable grid (tile maps).
+- **[Decided, 2026-11-13, Morgan]** Lists have element types (`list[int]` is a list of numbers; `[[1, 0], [0, 1]]` is a list of lists of numbers), and a list of equal-length lists is drawn as an **editable grid** (tile maps) with add and drop row and column. A typed list's elements take only that type, and its plus button adds a matching default (`0`, `''`, `False`, `[]`). Implemented in `python/sage/blocks.py` (`type_of`, `elem_type`, `grid_resize`) and the editor.
+- **[Decided, 2026-11-13, Morgan]** **Suggestions are narrowed by type**: with an expression slot selected, the palette offers only blocks whose output type fits the slot's input type (a statement or a bottom bar selected offers commands). A project setting, `suggest_by_type` (on by default), turns this off. Project settings live in `settings.sage` next to the scripts (one `key value` per line): a new small text format, awaiting Morgan's confirmation.
 
 ### 4.5 Calls and methods
 - **[Decided]** Nested sockets, Snap!-style; the receiver is the first slot of a method block. Chains are a *view* of the same nested-call AST and could also render as a horizontal pipeline later.
@@ -439,8 +442,8 @@ Three approaches were weighed:
 - **M0** headless Pong, determinism harness, one Python system (13.1).
 - **M1** 2D renderer on the SDL GPU API, asset pipeline basics, audio, input mapping. *Implemented 2026-11-10; see `docs/milestone-1.md` for the checks and the gaps.*
 - **M2** UI module, scene format with migrations, save games. *Implemented 2026-11-11; see `docs/milestone-2.md` for the checks, the decisions awaiting Morgan and the gaps.*
-- **M3** editor core: inspector, undo/redo, play-in-editor, text editing of Python.
-- **M4** block editor round trip (`libcst`), palette generated from reflection.
+- **M3** editor core: inspector, undo/redo, play-in-editor, text editing of Python. *Implemented 2026-11-13 (`crates/sage_editor`, `examples/editor`); see `docs/milestone-4.md`.*
+- **M4** block editor round trip (`libcst`), palette generated from reflection. *Implemented 2026-11-13; see `docs/milestone-4.md` for the checks and the gaps.*
 - **M5** first genre kit, extracted from the platformer dogfood game.
 - **M6** desktop export (Windows, then Linux and macOS); then Android and iOS, web, 3D, rigid-body module, VR.
 

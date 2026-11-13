@@ -188,6 +188,19 @@ pub enum RendererChoice {
     Sdl,
 }
 
+/// Picks a video driver that works before SDL starts. On Wayland desktops
+/// whose GNOME settings schema lacks a key SDL's libdecor GTK plugin reads
+/// (`org.gnome.settings-daemon.plugins.xsettings`, `antialiasing`), the plugin
+/// aborts the whole process. When an X server is reachable (XWayland) and the
+/// person has not chosen a driver, use it, with Wayland as the fallback;
+/// `SDL_VIDEODRIVER=wayland` still forces Wayland. Call before `sdl3::init`.
+pub fn prepare_video() {
+    let chosen = std::env::var_os("SDL_VIDEODRIVER").is_some();
+    if !chosen && std::env::var_os("DISPLAY").is_some() {
+        sdl3::hint::set("SDL_VIDEO_DRIVER", "x11,wayland");
+    }
+}
+
 #[derive(Clone, Debug)]
 pub struct WindowOptions {
     pub title: String,
@@ -271,6 +284,7 @@ pub fn run_windowed<S: Presentable>(
     input_map: &InputMap,
     options: &WindowOptions,
 ) -> Result<WindowRun, String> {
+    prepare_video();
     let sdl = sdl3::init().map_err(|e| e.to_string())?;
     let video = sdl.video().map_err(|e| e.to_string())?;
     let mut builder = video.window(&options.title, options.size.0, options.size.1);

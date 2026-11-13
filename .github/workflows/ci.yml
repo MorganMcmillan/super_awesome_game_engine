@@ -20,6 +20,10 @@ jobs:
         with:
           python-version: "3.12"
 
+      # The block editor's round trip uses libcst (docs/dependencies.md).
+      - name: Python dependencies (libcst)
+        run: python -m pip install --target python/vendor/py312 -r python/requirements.txt
+
       # SDL3 is built from source (static); it needs CMake and, on Linux, the
       # X11/Wayland/audio development headers. xvfb provides a display for the
       # windowed smoke test.

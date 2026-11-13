@@ -33,3 +33,6 @@ Test fixtures: three tiny generated tones (about 10 KB in all) in `crates/sage_a
 - `rustybuzz` 0.20.1 (MIT): shaping (kerning, ligatures) for proportional text, in `sage_assets::proportional`.
 - `unicode-segmentation` 1.13.3 (MIT OR Apache-2.0): grapheme-aware caret and delete in `sage_ui::text`.
 Still **not approved** and not used: `accesskit_unix`, `accesskit_macos`.
+
+**M4 (2026-11-13), approved by Morgan** (the instruction to use `libcst` for the block editor's round trip, design doc 4.1):
+- `libcst` 1.9.0 (MIT, with some PSF-licensed parts from CPython's grammar; its native parser is Rust code under MIT) and its one dependency `pyyaml` 6.0.3 (MIT). Python packages, not Cargo crates: `python/requirements.txt` pins them and `python -m pip install --target python/vendor/pyXY -r python/requirements.txt` installs them for the Python the engine embeds (`XY` is its version: 312 or 314). `python/vendor/` is not committed. `sage_editor::blocks::install` puts the directory on `sys.path` (override the base with `SAGE_PY_VENDOR`); the interpreter is isolated, so nothing else is visible. CI installs it for 3.12. It is an editor dependency: games do not need it at run time.

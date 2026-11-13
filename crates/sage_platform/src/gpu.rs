@@ -70,6 +70,7 @@ impl GpuRenderer {
 
     /// A renderer with no window, for `render_to_image`.
     pub fn offscreen() -> Result<GpuRenderer, String> {
+        crate::prepare_video();
         let sdl = sdl3::init().map_err(err)?;
         let video = sdl.video().map_err(err)?;
         let device = Device::new(ShaderFormat::SPIRV, cfg!(debug_assertions)).map_err(err)?;

@@ -1,5 +1,7 @@
 # Milestone 3: UI parity status
 
+*The editor itself (design doc 13.3's M3) and the block editor (M4) are in `docs/milestone-4.md`.*
+
 Date: 2026-11-11. Scope: the ECS UI that the editor (design doc 10.6) is built on, as planned in `docs/ui-html-parity.md` (design doc 9.5). M3 itself is the editor; this file tracks the UI phases P1 to P9 that come first, each with the test that proves it. Real-window behavior (mouse, clipboard, IME, native dialogs) is checked by hand with `cargo run -p ui_playground -- play`, because CI has no display.
 
 Morgan approved `accesskit`, `fontdue`, OGG and MP3 decoders, an SVG parser, `rustybuzz`, `unicode-segmentation` and the Windows `accesskit` adapter on 2026-11-11 (see `docs/dependencies.md`); they are in. Still **not approved**: the Linux and macOS `accesskit` adapters.
