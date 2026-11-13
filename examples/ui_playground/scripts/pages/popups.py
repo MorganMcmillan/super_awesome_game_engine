@@ -4,6 +4,7 @@
 # press or Escape, with keyboard focus moving in and returning.
 
 import sage
+from sage import world
 from sage.ui import Clicked, Combo, Interaction, Label, Layer, MenuChosen, MenuItem, MenuTitle, Select, Selected
 
 ui = world.ui

@@ -13,6 +13,7 @@
 # the state; nothing here is saved.
 
 import sage
+from sage import world
 from sage import Entity
 from sage import blocks as B
 from sage.ui import (

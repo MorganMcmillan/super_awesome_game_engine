@@ -265,6 +265,8 @@ _native_names = {}
 
 
 def _native_attr(modname, name):
+    if modname == _NATIVE_ROOT and name == "world":
+        return _loading_world()
     if name.startswith("__") or name not in _native_names.get(modname, ()):
         raise AttributeError(f"module {modname!r} has no attribute {name!r}")
     path = f"{modname}.{name}"
@@ -281,6 +283,17 @@ def _native_attr(modname, name):
     if cid == 0:
         raise ImportError(f"{path} is not a component in this world")
     return _class_for_native(world, cid)
+
+
+def _loading_world():
+    """`from sage import world`: the world that is loading this script."""
+    stack = _loading()
+    if not stack:
+        raise ImportError(
+            "sage.world can only be imported at the top level of a script "
+            "(it is the world that is loading the script)"
+        )
+    return stack[-1]
 
 
 def _native_module(modname):
@@ -313,6 +326,8 @@ def _expose_native(path):
     if not path.startswith(_NATIVE_ROOT + "."):
         return
     modname, _, name = path.rpartition(".")
+    if modname == _NATIVE_ROOT and name == "world":
+        raise ValueError(f"{path}: sage.world is defined by the engine")
     module = _native_module(modname)
     names = _native_names.setdefault(modname, set())
     if name not in names and name in module.__dict__:
@@ -597,3 +612,9 @@ class World:
 
     def __repr__(self):
         return f"World({self._native._path(self._native.script_module)})"
+
+
+# `from sage import world` works even when the host registers no native
+# component directly under `sage` (which is what installs the module's
+# `__getattr__` otherwise).
+_native_module(_NATIVE_ROOT)

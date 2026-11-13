@@ -16,6 +16,8 @@ import typing as _typing
 
 if _typing.TYPE_CHECKING:
     from sage import ecs as ecs
+
+    world: World  # the world loading this script: `from sage import world`
     from sage._native import *  # generated: native components directly under sage
     from sage.ecs import (
         TICK_DT as TICK_DT,

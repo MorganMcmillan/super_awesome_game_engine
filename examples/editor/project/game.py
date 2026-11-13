@@ -5,6 +5,7 @@
 # press PLAY, change this text and press APPLY, or build rules in BLOCKS.
 
 import sage
+from sage import world
 from sage import component, Entity
 
 

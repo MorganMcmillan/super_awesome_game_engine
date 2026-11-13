@@ -3,6 +3,7 @@
 # slots.
 
 import sage
+from sage import world
 from sage.ui import Display, Label, Rect, Reveal, Toggle, Toggled, Widget
 
 ui = world.ui

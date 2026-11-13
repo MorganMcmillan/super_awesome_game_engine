@@ -3,6 +3,7 @@
 # by `ui_playground access --page access`.
 
 import sage
+from sage import world
 from sage.ui import Label
 
 ui = world.ui

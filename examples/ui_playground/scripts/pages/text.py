@@ -2,6 +2,7 @@
 # text area that wraps and scrolls; number fields.
 
 import sage
+from sage import world
 from sage.ui import Caret, Changed, Label, Navigate, Slider, Submitted, TextChanged, TextField
 
 ui = world.ui

@@ -8,6 +8,7 @@
 # caret; PageUp/PageDown scroll.
 
 import sage
+from sage import world
 from sage import Entity, component
 from sage.ui import (
     Caret,

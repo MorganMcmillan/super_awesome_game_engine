@@ -23,6 +23,7 @@
 import math
 
 import sage
+from sage import world
 from sage import component, Entity
 
 # Engine vocabulary: native components the host registers, imported by path.

@@ -461,6 +461,30 @@ def drift(p: Pos):
 }
 
 #[test]
+fn world_is_importable_while_a_script_loads() {
+    // No native component is registered under `sage` here.
+    let g = Game::new(&src(r#"
+from sage import world as imported
+same = imported is world
+e = imported.entity("thing")
+"#));
+    assert!(g.eval::<bool>("same"));
+
+    let err = run_python("from sage import world").expect("must fail");
+    assert!(
+        err.contains("ImportError") && err.contains("top level"),
+        "{err}"
+    );
+
+    // A native component cannot take the name.
+    let w = World::new();
+    let ecs = Ecs::new(&w, 1, "game").unwrap();
+    let id = w.component_named::<PosA>("sage::world");
+    let err = ecs.register_native(*id.id()).unwrap_err();
+    assert!(err.contains("defined by the engine"), "{err}");
+}
+
+#[test]
 fn native_components_cannot_shadow_engine_names() {
     let world = World::new();
     let ecs = Ecs::new(&world, 1, "game").unwrap();

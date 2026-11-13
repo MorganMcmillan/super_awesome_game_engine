@@ -3,6 +3,7 @@
 # and lists.
 
 import sage
+from sage import world
 from sage.ui import Absolute, Label, Scroll, ScrollCross, Toggled
 
 ui = world.ui

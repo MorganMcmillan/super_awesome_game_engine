@@ -2,6 +2,7 @@
 # an embedded simulation view the host draws and the pointer drives.
 
 import sage
+from sage import world
 from sage import Entity, component
 from sage.ui import Label, Viewport
 

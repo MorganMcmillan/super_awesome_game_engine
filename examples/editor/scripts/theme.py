@@ -15,6 +15,7 @@
 #   TextInput -> Field
 
 from sage.ui import Box, Decor, Flow, Paint, Screen, States, TextStyle, Widget
+from sage import world
 
 ui = world.ui
 COLUMN, ROW = ui.COLUMN, ui.ROW

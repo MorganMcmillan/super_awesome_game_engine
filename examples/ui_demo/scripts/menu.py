@@ -2,6 +2,7 @@
 # the names below let the host find them without asking Python.
 
 from sage.ui import Changed, Clicked, Label, Toggled
+from sage import world
 
 ui = world.ui
 ui.start()

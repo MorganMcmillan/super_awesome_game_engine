@@ -2,6 +2,7 @@
 # display, state variants and transitions.
 
 import sage
+from sage import world
 from sage import component
 from sage.ui import Changed, Decor, Display, Image, Paint, Shown, Slider, Toggle, Toggled
 

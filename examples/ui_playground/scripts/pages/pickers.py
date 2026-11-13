@@ -3,6 +3,7 @@
 # value in a component, and emits an event when it changes.
 
 import sage
+from sage import world
 from sage.ui import Label
 
 ui = world.ui
