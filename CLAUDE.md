@@ -8,6 +8,7 @@ A game engine for rapid prototyping with a low skill floor and a high ceiling. G
 ## Source of truth
 - `claude/game-engine-design-doc.md` is the design. Read "How to use this document" and the tag meanings first. The design doc plans to move it to `docs/design.md`; ask Morgan before moving it. Until then the `claude/` copy is authoritative.
 - `docs/ui-html-parity.md`: the plan for recreating HTML's important features in the ECS UI (design doc 9.5). Phases P0 to P9; the editor (M3) is built on this UI. Dependencies it mentions are not yet approved.
+- `docs/ui-style.md`: capitalization and look of the engine's own UI. No all-caps UI text: Title Case for buttons, tabs, headings and menu items; sentence case for hints and messages; lower case for block words; names as written.
 - `claude/design-exercises.md` is design homework for Morgan ("exercise N" in the design doc). Do not attempt it.
 - `docs/notes/`. Contains misc notes written by Morgan while observing examples and the engine editor, including suggestions. Check off suggestions that are implemented.
 - `docs/milestone-0.md`: acceptance status and the placeholders waiting on Morgan. `docs/spikes/<id>.md`: spike write-ups. `docs/dependencies.md`: pins and licenses.
@@ -105,4 +106,5 @@ A game engine for rapid prototyping with a low skill floor and a high ceiling. G
 - The codename `sage` is a stand-in until the name is chosen (15). It lives in `sage_core::CODENAME`, `sage_script::PY_PACKAGE` and the `sage_` crate prefix.
 
 ## Working style
+- UI text is never all caps; follow `docs/ui-style.md`.
 - Small, reviewable changes. Update the design doc in the same change when behavior or a tag changes.

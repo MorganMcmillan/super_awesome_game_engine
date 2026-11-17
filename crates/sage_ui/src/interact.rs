@@ -156,7 +156,7 @@ fn interactive(w: Widget) -> bool {
 pub fn hit_test(tree: &Tree, order: &[usize], p: [f32; 2]) -> Option<usize> {
     order.iter().rev().copied().find(|&i| {
         let n = &tree.nodes[i];
-        (!matches!(n.widget, Widget::None | Widget::Meter) || n.hoverable)
+        (!matches!(n.widget, Widget::None | Widget::Meter) || n.hoverable || n.selectable)
             && n.rect.contains(p)
             && n.clip.is_none_or(|c| c.contains(p))
     })
@@ -458,7 +458,12 @@ fn content_cols(n: &Node) -> usize {
 
 /// The rows a text area shows (one row for a single-line field).
 fn field_rows(n: &Node) -> Vec<Row> {
-    rows(&n.text, content_cols(n), n.field.multiline)
+    let wrap = if n.selectable {
+        n.wrap
+    } else {
+        n.field.multiline
+    };
+    rows(&n.text, content_cols(n), wrap)
 }
 
 fn visible_rows(n: &Node) -> usize {
@@ -470,7 +475,7 @@ fn visible_rows(n: &Node) -> usize {
 fn index_at_point(n: &Node, p: [f32; 2]) -> usize {
     let adv = UI_ADVANCE * n.text_scale;
     let col = ((p[0] - (n.rect.x + n.padding[0])) / adv).round().max(0.0) as usize;
-    if n.field.multiline {
+    if n.field.multiline || n.selectable {
         let row = ((p[1] - (n.rect.y + n.padding[1])) / (UI_LINE_HEIGHT * n.text_scale))
             .floor()
             .max(0.0) as usize
@@ -688,8 +693,11 @@ pub fn update(tree: &mut Tree, st: &mut UiState, input: &UiInput) -> Vec<UiEvent
     // Forget ids that no longer exist or can no longer be used.
     let live = tree.live();
     let usable = |tree: &Tree, id: u64| {
-        find(tree, id)
-            .is_some_and(|i| live[i] && tree.nodes[i].enabled && interactive(tree.nodes[i].widget))
+        find(tree, id).is_some_and(|i| {
+            live[i]
+                && tree.nodes[i].enabled
+                && (interactive(tree.nodes[i].widget) || tree.nodes[i].selectable)
+        })
     };
     if !usable(tree, st.active) {
         st.active = 0;
@@ -710,7 +718,16 @@ pub fn update(tree: &mut Tree, st: &mut UiState, input: &UiInput) -> Vec<UiEvent
     let release = !input.down && st.prev_down;
 
     if press {
-        let target = hit.filter(|&i| interactive(tree.nodes[i].widget) && tree.nodes[i].enabled);
+        // Pressing anywhere else puts a text selection away.
+        let pressed = hit.map_or(0, |i| tree.nodes[i].id);
+        for n in &mut tree.nodes {
+            if n.selectable && n.id != pressed {
+                n.field.anchor = n.caret;
+            }
+        }
+        let target = hit.filter(|&i| {
+            (interactive(tree.nodes[i].widget) || tree.nodes[i].selectable) && tree.nodes[i].enabled
+        });
         match target {
             Some(i) => {
                 st.active = tree.nodes[i].id;
@@ -723,7 +740,7 @@ pub fn update(tree: &mut Tree, st: &mut UiState, input: &UiInput) -> Vec<UiEvent
                         kind: EventKind::Drag(0, 0.0, 0.0),
                     });
                 }
-                if tree.nodes[i].widget == Widget::TextInput
+                if (tree.nodes[i].widget == Widget::TextInput || tree.nodes[i].selectable)
                     && let Some(p) = input.pointer
                 {
                     let near = st.last_press.id == st.active
@@ -757,7 +774,9 @@ pub fn update(tree: &mut Tree, st: &mut UiState, input: &UiInput) -> Vec<UiEvent
                         _ => {}
                     }
                     n.field.want = usize::MAX;
-                    scroll_into_view(n);
+                    if n.widget == Widget::TextInput {
+                        scroll_into_view(n);
+                    }
                 }
                 if tree.nodes[i].widget.focusable() && st.focus != st.active {
                     st.focus = st.active;
@@ -799,15 +818,17 @@ pub fn update(tree: &mut Tree, st: &mut UiState, input: &UiInput) -> Vec<UiEvent
             kind: EventKind::Navigate(target),
         });
     }
-    // Dragging inside a text input extends the selection.
+    // Dragging inside a text input (or selectable text) extends the selection.
     if let (Some(p), Some(i)) = (input.pointer, find(tree, st.active))
         && input.down
         && !press
-        && tree.nodes[i].widget == Widget::TextInput
+        && (tree.nodes[i].widget == Widget::TextInput || tree.nodes[i].selectable)
     {
         let n = &mut tree.nodes[i];
         n.caret = index_at_point(n, p);
-        scroll_into_view(n);
+        if n.widget == Widget::TextInput {
+            scroll_into_view(n);
+        }
     }
     if let (Some(p), Some(i)) = (input.pointer, find(tree, st.active))
         && tree.nodes[i].widget == Widget::Handle
@@ -1046,9 +1067,15 @@ pub fn update(tree: &mut Tree, st: &mut UiState, input: &UiInput) -> Vec<UiEvent
     } else if input.wheel != 0.0
         && let Some(i) = container_under(tree)
     {
-        // Shift and the wheel scroll across the flow, in a container that can.
-        if input.nav & NAV_SHIFT != 0 && tree.nodes[i].scroll_cross {
-            st.scrolled |= scroll_cross_by(tree, i, input.wheel * SCROLL_STEP);
+        // Shift and the wheel (a sideways swipe on a touchpad arrives as
+        // this) scroll sideways: along a row's flow, across a column's, and
+        // not at all in a column that cannot.
+        if input.nav & NAV_SHIFT != 0 {
+            if tree.nodes[i].direction == Direction::Row {
+                st.scrolled |= scroll_by(tree, i, input.wheel * SCROLL_STEP);
+            } else if tree.nodes[i].scroll_cross {
+                st.scrolled |= scroll_cross_by(tree, i, input.wheel * SCROLL_STEP);
+            }
         } else {
             st.scrolled |= scroll_by(tree, i, input.wheel * SCROLL_STEP);
         }
@@ -1121,6 +1148,20 @@ pub fn update(tree: &mut Tree, st: &mut UiState, input: &UiInput) -> Vec<UiEvent
         if tree.nodes[i].widget == Widget::TextInput {
             edit_text(&mut tree.nodes[i], input, edge, &mut events);
         }
+    }
+    // Ctrl+C copies selected text, unless a text input has the keyboard.
+    if edge & NAV_COPY != 0
+        && !find(tree, st.focus).is_some_and(|f| tree.nodes[f].widget == Widget::TextInput)
+        && let Some(n) = tree
+            .nodes
+            .iter()
+            .find(|n| n.selectable && n.field.anchor != n.caret)
+    {
+        let (a, b) = (n.field.anchor.min(n.caret), n.field.anchor.max(n.caret));
+        events.push(UiEvent {
+            target: n.id,
+            kind: EventKind::Copied(n.text.chars().skip(a).take(b - a).collect()),
+        });
     }
     if edge & NAV_CANCEL != 0 && !escaped_a_layer {
         st.focus = 0;
@@ -1510,6 +1551,28 @@ mod tests {
         assert_eq!(t.nodes[0].scroll_offset, 80.0, "clamped to content - view");
         tick(&mut t, &mut st, &wheel(-20.0, 5.0, 5.0));
         assert_eq!(t.nodes[0].scroll_offset, 0.0);
+    }
+
+    #[test]
+    fn a_sideways_swipe_scrolls_across_a_column_that_can_and_leaves_one_that_cannot() {
+        let mut t = list();
+        let mut st = UiState::default();
+        let swipe = UiInput {
+            pointer: Some([5.0, 5.0]),
+            wheel: 1.0,
+            nav: NAV_SHIFT,
+            ..UiInput::default()
+        };
+        // A plain column: a sideways swipe does not scroll it up or down.
+        tick(&mut t, &mut st, &swipe);
+        assert_eq!(t.nodes[0].scroll_offset, 0.0);
+        // A column with a cross axis scrolls across.
+        t.nodes[0].scroll_cross = true;
+        t.nodes[1].width = Size::Fixed(300.0);
+        layout(&mut t, [100.0, 100.0]);
+        tick(&mut t, &mut st, &swipe);
+        assert_eq!(t.nodes[0].scroll_offset, 0.0);
+        assert_eq!(t.nodes[0].scroll_offset_cross, SCROLL_STEP);
     }
 
     #[test]
@@ -1914,6 +1977,38 @@ mod tests {
         keys_noclick(&mut t, &mut st, 0, Some('X'));
         assert_eq!((t.nodes[0].text.as_str(), t.nodes[0].caret), ("one X", 5));
         assert_eq!(t.nodes[0].field.anchor, 5, "the selection is gone");
+    }
+
+    #[test]
+    fn selectable_text_is_selected_by_a_drag_copied_and_let_go_of_by_a_press_elsewhere() {
+        let mut t = field_tree("hello world", false);
+        t.nodes[0].widget = Widget::None;
+        t.nodes[0].selectable = true;
+        let mut st = UiState::default();
+        // A drag selects, and the press made no click or focus.
+        let mut events = vec![];
+        events.extend(tick(&mut t, &mut st, &pointer(3.0, 4.0, true)));
+        events.extend(tick(&mut t, &mut st, &pointer(3.0 + 6.0 * 5.0, 4.0, true)));
+        events.extend(tick(&mut t, &mut st, &pointer(3.0 + 6.0 * 5.0, 4.0, false)));
+        assert!(events.is_empty(), "{events:?}");
+        assert_eq!((t.nodes[0].field.anchor, t.nodes[0].caret), (0, 5));
+        assert_eq!(st.focus, 0);
+        // Ctrl+C copies it, with nothing focused.
+        let copy = UiInput {
+            nav: NAV_COPY,
+            ..UiInput::default()
+        };
+        let ev = kinds(&tick(&mut t, &mut st, &copy));
+        assert_eq!(ev, vec![(7, EventKind::Copied("hello".into()))]);
+        // A press elsewhere (off the node) puts the selection away.
+        tick(&mut t, &mut st, &pointer(90.0, 90.0, true));
+        assert_eq!(t.nodes[0].field.anchor, t.nodes[0].caret);
+        // Text that is not selectable ignores the pointer.
+        t.nodes[0].selectable = false;
+        tick(&mut t, &mut st, &pointer(3.0, 4.0, false));
+        tick(&mut t, &mut st, &pointer(3.0, 4.0, true));
+        tick(&mut t, &mut st, &pointer(3.0 + 6.0 * 5.0, 4.0, true));
+        assert_eq!(t.nodes[0].field.anchor, t.nodes[0].caret);
     }
 
     #[test]

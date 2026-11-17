@@ -3,7 +3,7 @@
 
 import sage
 from sage import world
-from sage.ui import Caret, Changed, Label, Navigate, Slider, Submitted, TextChanged, TextField
+from sage.ui import Caret, Changed, Label, Navigate, Selectable, Slider, Submitted, TextChanged, TextField
 
 ui = world.ui
 T = world.theme
@@ -51,6 +51,13 @@ secret = tcard(tcol_a, "PASSWORD")
 password_field = ui.text_input(secret, "", placeholder="PASSWORD", prefab=T.Field, password=True)
 password_said = ui.add(T.Body, secret, text="TYPED: 0")
 ui.add(T.Muted, secret, text="NO COPY, NO CUT", wrap=True, width=ui.fill())
+
+# -- selectable text -----------------------------------------------------------------
+quote = tcard(tcol_a, "SELECTABLE TEXT")
+quote_said_plain = ui.add(T.Muted, quote, text="DRAG TO SELECT, DOUBLE CLICK A WORD, CTRL+C COPIES.", wrap=True, width=ui.fill())
+quote_text = ui.selectable(
+    ui.add(T.Body, quote, text="PLAIN TEXT IGNORES THE POINTER UNTIL IT IS MADE SELECTABLE.", wrap=True, width=ui.fill())
+)
 
 # -- text area ------------------------------------------------------------------------
 area_card = tcard(tcol_c, "TEXT AREA")

@@ -55,6 +55,7 @@ Morgan approved `accesskit`, `fontdue`, OGG and MP3 decoders, an SVG parser, `ru
 | drag and drop | `Draggable`, `DropZone`; `DragStarted`, `Dropped`, `DragEnded`; `Dnd` state singleton | `a_draggable_picks_up_after_a_few_units...`, `releasing_a_drag_off_every_zone...` (interact.rs); `a_drop_zone_takes_only_the_kinds_it_accepts...` |
 | reorderable list | `ui.sortable` over drag and drop | `dragging_a_row_onto_another_reorders_the_list` |
 | resize handles | `ui.resizable` (`ResizeOf`, a `Handle` grip) | `the_grip_resizes_a_panel_down_to_its_minimum` |
+| selectable text | `Selectable` + `Caret`, `ui.selectable(e)`: drag, double and triple click, Ctrl+C, a press elsewhere clears | `selectable_text_is_selected_by_a_drag...` (interact.rs); `text_is_selected_by_the_pointer...` (playground) |
 | keyboard shortcuts | `Shortcut`, `ui.shortcut("Ctrl+S")`; `ui.command("Ctrl+S")` (a `Shortcut` on an entity with no widget: the chord emits `Clicked` on it, for observers); window chords | `a_shortcut_chord_clicks_its_node...`, `a_shortcut_on_a_node_with_no_widget_is_a_command` (interact.rs); `a_command_is_a_shortcut_entity...` (tests/ui.rs); `key_chords_click_their_widget...`; `the_middle_button_and_key_chords_reach_the_tick_once` (ui_window.rs) |
 | modifiers | `NAV_SHIFT`, `NAV_WORD` (Ctrl), new `NAV_ALT`; chords carry `CHORD_CTRL/SHIFT/ALT` | same |
 | middle and right buttons | `MiddleClicked`; `ContextRequested` (P2) | `the_middle_button_clicks_on_release...` (interact.rs); `key_chords_click_their_widget_and_a_middle_click_is_its_own_event` |

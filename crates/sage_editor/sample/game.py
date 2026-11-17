@@ -2,7 +2,7 @@
 # system that moves everything with a velocity.
 #
 # Open it with `cargo run -p editor -- play`. Edit values in the inspector,
-# press PLAY, change this text and press APPLY, or build rules in BLOCKS.
+# press Play, change this text and press Apply, or build rules in Blocks.
 
 import sage
 from sage import world

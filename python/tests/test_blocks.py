@@ -464,6 +464,42 @@ class FlatBottoms(unittest.TestCase):
         out = c.replace(c.function("f")["body"][1]["id"], {"k": "return", "value": None})
         self.assertTrue(out.endswith("    a = 1\n    return\n"))
 
+    def test_dragging_a_block_takes_everything_below_it(self):
+        src = "def f():\n    a = 1\n    # about b\n    b = 2\n    c = 3\n\n\ndef g():\n    pass\n"
+        b = B.Blocks(src)
+        f, g = b.function("f"), b.function("g")
+        _, bb, c = f["body"]
+        out = b.move_tail(bb["id"], g["id"], "body", 0)
+        self.assertEqual(
+            out,
+            "def f():\n    a = 1\n\n\ndef g():\n    # about b\n    b = 2\n    c = 3\n    pass\n",
+        )
+        ast.parse(out)
+
+    def test_a_chain_moves_up_within_its_body_and_never_into_itself(self):
+        b = B.Blocks("def f():\n    a = 1\n    b = 2\n    c = 3\n")
+        f = b.function("f")
+        a, bb, c = f["body"]
+        out = b.move_tail(c["id"], f["id"], "body", 0)
+        self.assertEqual(out, "def f():\n    c = 3\n    a = 1\n    b = 2\n")
+        d = B.Blocks("def f():\n    a = 1\n    if a:\n        pass\n    c = 3\n")
+        f = d.function("f")
+        a, iff, c = f["body"]
+        with self.assertRaises(ValueError):
+            d.move_tail(a["id"], iff["id"], "body", 0)  # into a block it carries
+        with self.assertRaises(ValueError):
+            d.move_tail(iff["id"], f["id"], "body", 2)  # after itself
+        self.assertEqual(d.source, "def f():\n    a = 1\n    if a:\n        pass\n    c = 3\n")
+
+    def test_a_whole_body_taken_leaves_pass_and_a_terminal_chain_goes_last(self):
+        b = B.Blocks("def f():\n    a = 1\n    return a\n\n\ndef g():\n    x = 0\n    y = 1\n")
+        f, g = b.function("f"), b.function("g")
+        a = f["body"][0]
+        with self.assertRaises(ValueError):
+            b.move_tail(a["id"], g["id"], "body", 1)  # the return would not be last
+        out = b.move_tail(a["id"], g["id"], "body", 2)
+        self.assertEqual(out, "def f():\n    pass\n\n\ndef g():\n    x = 0\n    y = 1\n    a = 1\n    return a\n")
+
     def test_moves_obey_the_same_rule(self):
         b = B.Blocks("def f(x):\n    a = 1\n    return a\n    pass\n".replace("    pass\n", ""))
         f = b.function("f")

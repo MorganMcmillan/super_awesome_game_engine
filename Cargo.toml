@@ -10,8 +10,11 @@ members = [
     "crates/sage_scene",
     "crates/sage_ui",
     "crates/sage_editor",
+    "crates/sage_app",
+    "crates/sage_platformer",
     "tools/shaderc",
     "examples/pong",
+    "examples/platformer",
     "examples/ui_demo",
     "examples/ui_playground",
     "examples/editor",
@@ -28,8 +31,11 @@ default-members = [
     "crates/sage_scene",
     "crates/sage_ui",
     "crates/sage_editor",
+    "crates/sage_app",
+    "crates/sage_platformer",
     "tools/shaderc",
     "examples/pong",
+    "examples/platformer",
     "examples/ui_demo",
     "examples/ui_playground",
     "examples/editor",
@@ -74,6 +80,8 @@ sage_assets = { path = "crates/sage_assets" }
 sage_scene = { path = "crates/sage_scene" }
 sage_ui = { path = "crates/sage_ui" }
 sage_editor = { path = "crates/sage_editor" }
+sage_app = { path = "crates/sage_app" }
+sage_platformer = { path = "crates/sage_platformer" }
 
 [profile.dev]
 # Flecs's C code and the Python interpreter are slow unoptimized; keep our own
@@ -92,6 +100,8 @@ opt-level = 2
 [profile.dev.package.sage_ecs_py]
 opt-level = 2
 [profile.dev.package.sage_editor]
+opt-level = 2
+[profile.dev.package.sage_app]
 opt-level = 2
 [profile.dev.package.sage_core]
 opt-level = 2

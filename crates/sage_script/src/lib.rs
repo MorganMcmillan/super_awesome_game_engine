@@ -139,20 +139,55 @@ impl Script {
         source: &str,
         prelude: Vec<(String, Py<PyAny>)>,
     ) -> Result<Script, ScriptError> {
+        Self::run_parts(name, &[(None, source)], prelude)
+    }
+
+    /// One script written as several files: each part runs in order in the
+    /// same globals, so the parts read and behave like one file cut at those
+    /// points. A traceback names the part (`<name/part>`) and the line in it.
+    pub fn load_parts(
+        name: &str,
+        parts: &[(&str, &str)],
+        prelude: Vec<(String, Py<PyAny>)>,
+    ) -> Result<Script, ScriptError> {
+        let parts: Vec<_> = parts.iter().map(|(n, s)| (Some(*n), *s)).collect();
+        Self::run_parts(name, &parts, prelude)
+    }
+
+    fn run_parts(
+        name: &str,
+        parts: &[(Option<&str>, &str)],
+        prelude: Vec<(String, Py<PyAny>)>,
+    ) -> Result<Script, ScriptError> {
         init()?;
         Python::attach(|py| {
             let fail = |e: PyErr| describe(py, &e);
+            let builtins = py.import("builtins").map_err(fail)?;
             let globals = PyDict::new(py);
             globals.set_item("__name__", name).map_err(fail)?;
-            globals
-                .set_item("__builtins__", py.import("builtins").map_err(fail)?)
-                .map_err(fail)?;
+            globals.set_item("__builtins__", &builtins).map_err(fail)?;
             for (key, value) in prelude {
                 globals.set_item(key, value).map_err(fail)?;
             }
-            let code = CString::new(source)
-                .map_err(|_| ScriptError(format!("{name}: source contains a NUL byte")))?;
-            py.run(&code, Some(&globals), None).map_err(fail)?;
+            for (part, source) in parts {
+                match part {
+                    // A single-file script keeps the file name `<string>`.
+                    None => {
+                        let code = CString::new(*source).map_err(|_| {
+                            ScriptError(format!("{name}: source contains a NUL byte"))
+                        })?;
+                        py.run(&code, Some(&globals), None).map_err(fail)?;
+                    }
+                    Some(part) => {
+                        let code = builtins
+                            .call_method1("compile", (*source, format!("<{name}/{part}>"), "exec"))
+                            .map_err(fail)?;
+                        builtins
+                            .call_method1("exec", (code, &globals))
+                            .map_err(fail)?;
+                    }
+                }
+            }
 
             let mut handlers = vec![];
             for (key, value) in globals.iter() {
@@ -267,6 +302,41 @@ mod tests {
             assert_eq!(get(&a), 1);
             assert_eq!(get(&b), 10);
         });
+    }
+
+    #[test]
+    fn parts_share_one_namespace_and_errors_name_the_part() {
+        let s = Script::load_parts(
+            "app",
+            &[
+                ("first", "state = [1]\ndef bump(): later()\n"),
+                ("second", "def later(): state[0] += 1\nbump()\n"),
+            ],
+            vec![],
+        )
+        .unwrap();
+        Python::attach(|py| {
+            let state: Vec<i64> = s
+                .globals(py)
+                .get_item("state")
+                .unwrap()
+                .unwrap()
+                .extract()
+                .unwrap();
+            assert_eq!(state, vec![2]);
+        });
+        let err = Script::load_parts(
+            "app",
+            &[("first", "x = 1\n"), ("second", "\n\nraise ValueError('boom')\n")],
+            vec![],
+        )
+        .err()
+        .unwrap();
+        assert!(
+            err.0.contains("<app/second>") && err.0.contains("line 3"),
+            "{}",
+            err.0
+        );
     }
 
     #[test]

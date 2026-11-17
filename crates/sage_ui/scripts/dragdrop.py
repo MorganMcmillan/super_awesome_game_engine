@@ -4,7 +4,10 @@
 
 import sage
 from sage import component
-from sage.ui import Box, Draggable, DropZone, Dragged, Dropped, Label, Order, Rect, Shortcut, Widget, Drag
+from sage.ui import (
+    Absolute, Box, Caret, Display, Dnd, Draggable, DropZone, Dragged, Dropped, Flow, Label, Order, Rect, Selectable, Shortcut, Widget, Drag,
+)
+from sage import Entity
 
 ui = world.ui
 COLUMN, ROW = ui.COLUMN, ui.ROW
@@ -65,6 +68,17 @@ def shortcut(e, chord):
     return e
 
 
+def selectable(e):
+    """Lets the user select `e`'s text with the pointer (drag, double click for
+    a word, triple click for a line) and copy it with Ctrl+C. Plain text
+    ignores the pointer, so this is opt-in. The selection is the node's
+    `Selectable.anchor` and `Caret.pos`; a press anywhere else clears it. Take
+    care with text inside a button: selectable text takes the press."""
+    e.set(Selectable(0))
+    e.set(Caret(0))
+    return e
+
+
 def command(chord, name=None, sid=None):
     """A shortcut with nothing to click: an entity that is only a key chord.
     Pressing the chord emits `Clicked` on it, so a command is an observer:
@@ -85,6 +99,7 @@ def command(chord, name=None, sid=None):
 
 ui.draggable, ui.drop_zone, ui.shortcut, ui.parse_chord = draggable, drop_zone, shortcut, parse_chord
 ui.command = command
+ui.selectable = selectable
 
 
 # ---- resizing ----------------------------------------------------------------------
@@ -166,7 +181,15 @@ class Reordered:
     to: sage.u32 = 0
 
 
+@component
+class DropBar:
+    """The line that shows where a dragged row will land."""
+
+    container: sage.u64 = 0
+
+
 ui.SortRow = world.prefab("UiSortRow", base=ui.Panel)
+ui.DropBar = world.prefab("UiDropBar", base=ui.Panel)
 
 
 def sortable(parent, items, **style):
@@ -180,6 +203,8 @@ def sortable(parent, items, **style):
         drop_zone(row, (31,))
         ui.add(ui.Text, row, text=text)
     root.set(Sortable(len(items)))
+    bar = ui.add(ui.DropBar, root, at=(0, 0), width=2, height=2, display=False, z=50)
+    bar.set(DropBar(root.sid))
     return root
 
 
@@ -202,6 +227,27 @@ def _set_items(root, items):
 
 ui.sortable, ui.sortable_items = sortable, sortable_items
 ui.Reordered = Reordered
+
+
+@world.system(phase=sage.PostUpdate)
+def _ui_drop_bar(bar_e: Entity, bar: DropBar):
+    """While a row is dragged over another, a line marks the edge it will land
+    against: the far edge going down, the near edge going up."""
+    root = world.lookup(bar.container)
+    dnd = world.get(Dnd)
+    row = source = None
+    if root is not None and dnd is not None and dnd.dragging:
+        source = world.lookup(dnd.source)
+        if source is not None and source.has(SortRow) and source.get(SortRow).list == root.sid:
+            row = next((r for r in _rows(root) if r.sid != source.sid and r.get(DropZone).over), None)
+    if row is None:
+        bar_e.set(Display(1))
+        return
+    down = source.get(SortRow).index < row.get(SortRow).index
+    r, c, f = row.get(Rect), root.get(Rect), root.get(Flow)
+    bar_e.set(Absolute(r.x - c.x - f.pad_left, r.y + (r.h if down else 0.0) - c.y - f.pad_top - 1.0))
+    bar_e.set(Box(1, r.w, 1, 2.0))
+    bar_e.set(Display(0))
 
 
 @world.observer(Dropped)
@@ -246,7 +292,7 @@ REORDER_KIND = 30
 def in_order(container):
     """The children of `container` in the order they are shown (their `Order`
     keys, ties in creation order)."""
-    kids = list(container.children)
+    kids = [k for k in container.children if not k.has(DropBar)]
     keyed = [((k.get(Order).key if k.has(Order) else 0), i, k) for i, k in enumerate(kids)]
     return [k for _, _, k in sorted(keyed, key=lambda t: (t[0], t[1]))]
 

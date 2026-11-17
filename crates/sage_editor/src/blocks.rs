@@ -14,6 +14,20 @@ use std::sync::OnceLock;
 
 pub const BLOCKS_SOURCE: &str = include_str!("../../../python/sage/blocks.py");
 
+/// The editor's other Python modules, loaded after `sage.blocks`: `(name,
+/// source)`. Each is importable as `sage.<name>` and, like `blocks`, by its
+/// bare name (the tests import them that way).
+pub const MODULES: &[(&str, &str)] = &[
+    (
+        "commands",
+        include_str!("../../../python/sage/commands.py"),
+    ),
+    (
+        "provenance",
+        include_str!("../../../python/sage/provenance.py"),
+    ),
+];
+
 /// Where `libcst` lives: `SAGE_PY_VENDOR`, else `python/vendor` in the
 /// repository this crate was built from.
 pub fn vendor_dir() -> String {
@@ -43,13 +57,18 @@ pub fn install() -> Result<(), String> {
                         "libcst is not installed in {dir}: run `python -m pip install --target {dir} -r python/requirements.txt` with the Python the engine embeds"
                     )));
                 }
-                let code = CString::new(BLOCKS_SOURCE).unwrap();
-                let m = PyModule::from_code(py, &code, c"<sage.blocks>", c"sage.blocks")?;
-                sys.getattr("modules")?.set_item("sage.blocks", &m)?;
-                sys.getattr("modules")?.set_item("blocks", &m)?;
-                sage_script::package(py)
-                    .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e.0))?
-                    .setattr("blocks", &m)?;
+                let package = sage_script::package(py)
+                    .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e.0))?;
+                let modules = sys.getattr("modules")?;
+                for (name, source) in [("blocks", BLOCKS_SOURCE)].iter().chain(MODULES) {
+                    let full = format!("{}.{name}", sage_script::PY_PACKAGE);
+                    let code = CString::new(*source).unwrap();
+                    let file = CString::new(format!("<{full}>")).unwrap();
+                    let m = PyModule::from_code(py, &code, &file, &CString::new(&*full).unwrap())?;
+                    modules.set_item(&full, &m)?;
+                    modules.set_item(name, &m)?;
+                    package.setattr(*name, &m)?;
+                }
                 Ok(())
             })
             .map_err(|e| Python::attach(|py| sage_script::describe(py, &e).0))

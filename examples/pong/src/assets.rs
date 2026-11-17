@@ -41,12 +41,8 @@ mod tests {
     #[test]
     fn committed_assets_match_the_generator() {
         // Run `cargo run -p pong -- gen-assets` after changing the generator.
-        for (name, bytes) in generate().unwrap() {
-            let path = std::path::Path::new(DIR).join(name);
-            let on_disk =
-                std::fs::read(&path).unwrap_or_else(|e| panic!("{}: {e}", path.display()));
-            assert_eq!(bytes, on_disk, "{name} is stale");
-        }
+        let stale = sage_assets::generated::stale(DIR, &generate().unwrap());
+        assert!(stale.is_empty(), "stale: {stale:?}");
     }
 
     #[test]

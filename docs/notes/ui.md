@@ -1,4 +1,6 @@
-- [ ] Rounded buttons have a square outline when selected. The outline needs to be rounded with the element.
-- [ ] Gradients use naive interpolation. Using OKLAB would yield a nicer looking gradient.
-- [ ] Text elements currently cannot be drag-selected and copied.
-- [ ] Password in UI playground should show `*` replacement characters
+- [x] Rounded buttons have a square outline when selected. The outline needs to be rounded with the element.
+- [x] Gradients use naive interpolation. Using OKLAB would yield a nicer looking gradient.
+- [x] Text elements currently cannot be drag-selected and copied. There should be a component to allow this (opt-in).
+- [x] Password in UI playground currently appears blank when typed.
+- [x] "Sticky and two-way" example does not work with laptop touchpad when scrolling left or right.
+- [x] Reorder example gives no indication for where a dragged element is about to go

@@ -1,3 +1,4 @@
+use sage_app::UiHosted;
 use sage_core::host::UiDraw;
 use sage_ui::interact::{NAV_ACCEPT, NAV_NEXT, NAV_RIGHT};
 use ui_demo::{Demo, SCREEN};
@@ -68,12 +69,12 @@ fn the_whole_menu_fits_on_the_screen() {
 fn the_menu_works_from_the_keyboard_and_renders_identically_twice() {
     let render = || {
         let demo = Demo::new().unwrap();
-        demo.nav(NAV_NEXT); // Play
-        demo.nav(NAV_ACCEPT);
+        demo.press(NAV_NEXT); // Play
+        demo.press(NAV_ACCEPT);
         assert_eq!(demo.status(), "Starting...");
-        demo.nav(NAV_NEXT); // Music
-        demo.nav(NAV_NEXT); // Volume
-        demo.nav(NAV_RIGHT);
+        demo.press(NAV_NEXT); // Music
+        demo.press(NAV_NEXT); // Volume
+        demo.press(NAV_RIGHT);
         assert_eq!(demo.status(), "Volume 4");
         demo.render([320, 240]).to_png_bytes().unwrap()
     };

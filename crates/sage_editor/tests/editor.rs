@@ -86,7 +86,7 @@ fn edits_undo_and_redo_and_reach_the_live_world() {
     assert_eq!(field(&p, 1, "Position", "x"), "42.0");
     assert!(p.live_scene().write().contains("x=42.0"));
     assert!(p.doc.dirty());
-    p.doc.undo().unwrap();
+    p.undo().unwrap();
     p.sync().unwrap();
     assert_eq!(p.doc.scene.write(), before);
     assert!(
@@ -95,7 +95,7 @@ fn edits_undo_and_redo_and_reach_the_live_world() {
         p.live_scene().write()
     );
     assert!(!p.doc.dirty());
-    p.doc.redo().unwrap();
+    p.redo().unwrap();
     assert_eq!(field(&p, 1, "Position", "x"), "42.0");
 }
 
@@ -122,11 +122,11 @@ fn a_drag_is_one_undo_step_until_the_gesture_ends() {
     p.doc.end_gesture();
     p.doc.set_field(1, &pos, "x", "9").unwrap();
     assert_eq!(p.doc.history.labels().len(), 2);
-    p.doc.undo().unwrap();
+    p.undo().unwrap();
     assert_eq!(field(&p, 1, "Position", "x"), "5.0");
-    p.doc.undo().unwrap();
+    p.undo().unwrap();
     assert_eq!(field(&p, 1, "Position", "x"), "1.0");
-    assert!(p.doc.undo().is_none());
+    assert!(p.undo().is_none());
 }
 
 #[test]
@@ -134,7 +134,7 @@ fn editing_after_an_undo_never_merges_and_drops_redo() {
     let mut p = project();
     let pos = p.doc.inspect(1).unwrap().components[0].path.clone();
     p.doc.set_field(1, &pos, "x", "2").unwrap();
-    p.doc.undo().unwrap();
+    p.undo().unwrap();
     p.doc.set_field(1, &pos, "x", "3").unwrap();
     assert!(!p.doc.history.can_redo());
     assert_eq!(p.doc.history.labels().len(), 1);
@@ -169,9 +169,9 @@ fn entities_are_added_renamed_duplicated_and_deleted_with_undo() {
     assert!(p.doc.inspect(e).is_none() && p.doc.inspect(child).is_none());
     assert!(p.doc.inspect(copy).is_some());
     // Every step undoes, back to the start.
-    while p.doc.undo().is_some() {}
+    while p.undo().is_some() {}
     assert_eq!(p.doc.scene.write(), start);
-    while p.doc.redo().is_some() {}
+    while p.redo().is_some() {}
     assert!(p.doc.inspect(copy).is_some() && p.doc.inspect(e).is_none());
     p.doc.remove_component(copy, &vel).unwrap();
     assert!(p.doc.remove_component(copy, &vel).is_err());
@@ -269,4 +269,115 @@ fn a_fault_while_playing_stops_the_session() {
     assert!(e.contains("undefined_name"), "{e}");
     assert_eq!(p.mode, Mode::Edit);
     assert!(p.error.is_some());
+}
+
+#[test]
+fn undo_is_one_stack_for_the_scene_and_the_scripts() {
+    let mut p = project();
+    let pos = p.doc.inspect(1).unwrap().components[0].path.clone();
+    let faster = GAME.replace("pos.x += vel.x", "pos.x += vel.x * 10");
+    // A scene edit, a script edit, then another scene edit.
+    p.doc.set_field(1, &pos, "x", "5").unwrap();
+    p.doc.end_gesture();
+    p.edit_source("game", &faster, "Make it faster").unwrap();
+    p.reload().unwrap();
+    p.doc.set_field(2, &pos, "x", "77").unwrap();
+    assert_eq!(
+        p.doc.history.labels(),
+        ["Set Position.x", "Make it faster", "Set Position.x"]
+    );
+
+    // Undo walks back through them in order, whatever each one changed.
+    let step = p.undo().unwrap();
+    assert!(step.scene && step.sources.is_empty());
+    assert_eq!(field(&p, 2, "Position", "x"), "10.0");
+    assert_eq!(p.source("game"), Some(faster.as_str()));
+
+    let step = p.undo().unwrap();
+    assert_eq!(step.label, "Make it faster");
+    assert!(!step.scene);
+    assert_eq!(step.sources[0].0, "game");
+    assert_eq!(p.source("game"), Some(GAME), "the script is back");
+    assert!(p.stale, "and waits for a reload");
+    p.reload().unwrap();
+    assert_eq!(field(&p, 1, "Position", "x"), "5.0", "the scene is untouched");
+
+    p.undo().unwrap();
+    assert_eq!(field(&p, 1, "Position", "x"), "1.0");
+    assert!(p.undo().is_none());
+
+    // And forward again.
+    p.redo().unwrap();
+    p.redo().unwrap();
+    assert_eq!(p.source("game"), Some(faster.as_str()));
+    p.reload().unwrap();
+    p.redo().unwrap();
+    assert_eq!(field(&p, 2, "Position", "x"), "77.0");
+    assert!(p.redo().is_none());
+    // The rule that plays is the redone one.
+    p.play().unwrap();
+    p.step(1).unwrap();
+    assert!(p.live_scene().write().contains("x=15.0"), "5 + 1 * 10");
+}
+
+#[test]
+fn setting_a_script_to_the_text_it_has_is_not_a_step_and_an_edit_drops_redo() {
+    let mut p = project();
+    p.set_source("game", GAME).unwrap();
+    assert!(!p.doc.history.can_undo());
+    assert!(!p.stale);
+    p.set_source("game", &format!("{GAME}\n# one\n")).unwrap();
+    assert_eq!(p.doc.history.labels(), ["Edit game.py"]);
+    p.undo().unwrap();
+    assert!(p.doc.history.can_redo());
+    p.set_source("game", &format!("{GAME}\n# two\n")).unwrap();
+    assert!(!p.doc.history.can_redo(), "a new edit drops what was undone");
+    assert!(p.set_source("nope", "x = 1\n").is_err());
+}
+
+#[test]
+fn unsaved_means_the_scene_or_a_script_differs_from_the_disk() {
+    let dir = std::env::temp_dir().join(format!("sage-dirty-{}", std::process::id()));
+    let mut p = project();
+    assert!(!p.dirty());
+    p.set_source("game", &format!("{GAME}\n# a note\n")).unwrap();
+    p.reload().unwrap();
+    assert!(!p.stale);
+    assert!(p.dirty(), "reloaded is not saved");
+    p.save_dir(&dir).unwrap();
+    assert!(!p.dirty());
+    p.undo().unwrap();
+    assert!(p.dirty(), "undoing past a save is a change to save");
+    p.redo().unwrap();
+    assert!(!p.dirty());
+    std::fs::remove_dir_all(&dir).unwrap();
+}
+
+#[test]
+fn changing_a_components_fields_makes_earlier_scene_edits_permanent() {
+    let mut p = project();
+    let pos = p.doc.inspect(1).unwrap().components[0].path.clone();
+    p.doc.set_field(1, &pos, "x", "5").unwrap();
+    // The script gives Position a new field: old scene differences describe
+    // entities without it.
+    let taller = GAME.replace(
+        "class Position:\n    x: sage.f32 = 0.0",
+        "class Position:\n    z: sage.f32 = 0.0\n    x: sage.f32 = 0.0",
+    );
+    assert_ne!(taller, GAME);
+    p.set_source("game", &taller).unwrap();
+    p.reload().unwrap();
+    assert_eq!(p.doc.history.labels(), ["Edit game.py"]);
+    assert!(
+        p.warnings.iter().any(|w| w.contains("can no longer be undone")),
+        "{:?}",
+        p.warnings
+    );
+    assert_eq!(field(&p, 1, "Position", "z"), "0.0");
+    // The script edit itself still undoes, and the scene follows the fields.
+    p.undo().unwrap();
+    p.reload().unwrap();
+    assert_eq!(p.source("game"), Some(GAME));
+    assert_eq!(field(&p, 1, "Position", "x"), "5.0");
+    assert!(p.doc.inspect(1).unwrap().components[0].fields.iter().all(|f| f.name != "z"));
 }

@@ -755,6 +755,29 @@ pub fn compose_ui(
     batch
 }
 
+/// Renders a UI frame into an image of `size` pixels with the CPU reference
+/// rasterizer: the same batch the GPU draws, so screenshots and tests need no
+/// device. `images` are the assets the frame may draw, by `AssetId`.
+pub fn render_ui(
+    frame: &UiFrame,
+    font: &BitmapFont,
+    images: &[(u64, Image)],
+    clear: [u8; 4],
+    size: [u32; 2],
+) -> Image {
+    let mut res = UiResources::new(2);
+    for (id, image) in images {
+        res.register_asset(*id, image.clone());
+    }
+    let batch = compose_ui(frame, [size[0] as f32, size[1] as f32], font, &mut res);
+    let px = rasterize(&batch, &res.textures(font), clear, size);
+    Image {
+        width: size[0],
+        height: size[1],
+        rgba: px.into_iter().flatten().collect(),
+    }
+}
+
 /// Fills a triangle given as `(pixel position, color)` corners, blending
 /// colors by barycentric weight. A pixel is covered when its center is
 /// inside; a center exactly on an edge counts only for a top or left edge, so

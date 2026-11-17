@@ -528,6 +528,9 @@ pub struct Node {
     pub drop_over: bool,
     /// A key chord that acts as a click on this node: key and modifiers.
     pub shortcut: Option<[u32; 2]>,
+    /// The pointer selects this node's text (the anchor is `field.anchor`,
+    /// the moving end `caret`).
+    pub selectable: bool,
     /// Space outside the box: left, top, right, bottom.
     pub margin: [f32; 4],
     /// Smallest and largest size per axis (0 for no limit).
@@ -626,6 +629,7 @@ impl Default for Node {
             drop_kinds: 0,
             drop_over: false,
             shortcut: None,
+            selectable: false,
             margin: [0.0; 4],
             size_min: [0.0; 2],
             size_max: [0.0; 2],

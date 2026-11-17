@@ -1,0 +1,14 @@
+[package]
+name = "platformer"
+description = "A platformer made from the platformer kit: a level, a few tuning numbers and one rule."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+[dependencies]
+sage_app.workspace = true
+sage_core.workspace = true
+sage_platformer.workspace = true
+sage_platform.workspace = true
+sage_assets.workspace = true

@@ -13,6 +13,7 @@
 
 pub mod a11y;
 pub mod audio;
+pub mod game_window;
 pub mod gpu;
 pub mod input;
 pub mod media;

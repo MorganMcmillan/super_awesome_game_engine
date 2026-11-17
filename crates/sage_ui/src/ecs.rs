@@ -218,6 +218,14 @@ ui_component!(
     UiDropZone { kinds: u32, over: u32 }
 );
 ui_component!(
+    /// Lets the pointer select this node's text and Ctrl+C copy it (opt-in:
+    /// plain text ignores the pointer). `anchor` is the fixed end of the
+    /// selection; the moving end is the node's `Caret`, so add both (see
+    /// `ui.selectable`). Selecting by drag, double click (word) and triple
+    /// click (line) work as in a text input.
+    UiSelectable { anchor: u32 }
+);
+ui_component!(
     /// A key chord that acts as a click on this node (on a node with no
     /// widget, a command: see `ui.command`). `key` is an upper-case
     /// ASCII letter or digit, or `0x100 + n - 1` for F`n`; `mods` is a bit set
@@ -673,6 +681,7 @@ struct Source {
     slider: Option<UiSlider>,
     scroll: Option<UiScroll>,
     caret: Option<UiCaret>,
+    selectable: Option<UiSelectable>,
     drag: Option<UiDrag>,
     zone: Option<UiDropZone>,
     viewport: Option<UiViewport>,
@@ -738,6 +747,7 @@ fn build(
         let cross = e.try_get::<&UiScrollCross>(|c| *c);
         let viewport = e.try_get::<&UiViewport>(|c| *c);
         let shortcut = e.try_get::<&UiShortcut>(|c| *c);
+        let selectable = e.try_get::<&UiSelectable>(|c| *c);
         let space = e.try_get::<&UiSpace>(|c| *c);
         let grid = e.try_get::<&UiGrid>(|c| *c);
         let cell = e.try_get::<&UiCell>(|c| *c);
@@ -903,6 +913,10 @@ fn build(
         } else {
             n.field.anchor = n.caret;
         }
+        if let Some(sel) = selectable {
+            n.selectable = true;
+            n.field.anchor = sel.anchor as usize;
+        }
         if let Some(h) = &hist {
             n.field.hist = history_from(h, strings);
         }
@@ -1010,6 +1024,7 @@ fn build(
             slider,
             scroll,
             caret,
+            selectable,
             drag,
             zone,
             viewport,
@@ -1142,6 +1157,13 @@ fn step(world: &WorldRef, strings: &RefCell<StringTable>, sizes: &RefCell<ImageS
         {
             e.set(UiCaret {
                 pos: n.caret as u32,
+            });
+        }
+        if let Some(old) = src.selectable
+            && old.anchor as usize != n.field.anchor
+        {
+            e.set(UiSelectable {
+                anchor: n.field.anchor as u32,
             });
         }
         if let Some(old) = src.slider
@@ -1514,6 +1536,7 @@ pub fn setup(world: &World, ecs: &Ecs) -> Result<(), String> {
         UiDraggable => "sage::ui::Draggable",
         UiDropZone => "sage::ui::DropZone",
         UiShortcut => "sage::ui::Shortcut",
+        UiSelectable => "sage::ui::Selectable",
         UiAccess => "sage::ui::Access",
         UiMedia => "sage::ui::Media",
         UiSvg => "sage::ui::Svg",

@@ -4,7 +4,7 @@
 //! schema, four consumers). Every edit is a transaction on the scene; the
 //! host then loads the scene into the live world.
 
-use crate::history::{History, SceneDiff};
+use crate::history::{History, SceneDiff, Step};
 use sage_scene::{Kind, Scene, SceneComponent, SceneEntity, Schemas, Value};
 
 /// Parses what a person typed into a field of `kind`.
@@ -481,18 +481,21 @@ impl Document {
         Ok(new)
     }
 
-    pub fn undo(&mut self) -> Option<String> {
-        let l = self.history.undo(&mut self.scene)?;
+    /// Takes back the last step. The scene half is applied here; a step that
+    /// changed scripts hands their texts back, so undo through
+    /// [`crate::Project::undo`], which owns the scripts.
+    pub(crate) fn undo(&mut self) -> Option<Step> {
+        let step = self.history.undo(&mut self.scene)?;
         self.fix_selection();
         self.touch();
-        Some(l)
+        Some(step)
     }
 
-    pub fn redo(&mut self) -> Option<String> {
-        let l = self.history.redo(&mut self.scene)?;
+    pub(crate) fn redo(&mut self) -> Option<Step> {
+        let step = self.history.redo(&mut self.scene)?;
         self.fix_selection();
         self.touch();
-        Some(l)
+        Some(step)
     }
 
     fn fix_selection(&mut self) {
@@ -505,6 +508,26 @@ impl Document {
 
     pub fn inspect(&self, sid: u64) -> Option<EntityView> {
         inspect(&self.scene, sid)
+    }
+
+    /// How many entities are instances of the prefab called `name`: they
+    /// have an `IsA` pair whose target's path ends with it.
+    pub fn instances_of(&self, name: &str) -> usize {
+        let is_named = |path: &str| {
+            path == name
+                || path
+                    .strip_suffix(name)
+                    .is_some_and(|rest| rest.ends_with('.') || rest.ends_with("::"))
+        };
+        self.scene
+            .entities
+            .iter()
+            .filter(|e| {
+                e.pairs
+                    .iter()
+                    .any(|p| p.rel.ends_with("IsA") && is_named(&p.target_path))
+            })
+            .count()
     }
 
     pub fn outliner(&self) -> Vec<OutlinerRow> {

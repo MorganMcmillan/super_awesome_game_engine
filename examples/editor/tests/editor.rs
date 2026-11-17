@@ -2,6 +2,7 @@
 //! the UI, then looking at the document, the game and the source.
 
 use editor::{Editor, sample_project};
+use sage_app::UiHosted;
 use sage_core::host::{
     CHORD_ALT, CHORD_CTRL, CHORD_SHIFT, NAV_ACCEPT, NAV_CANCEL, NAV_SELECT_ALL, NAV_SHIFT,
 };
@@ -173,19 +174,21 @@ fn the_code_tab_applies_new_rules_live_and_reports_errors() {
     assert!(shown.contains("def move(pos: Position, vel: Velocity)"));
     // A broken edit is reported and the old game keeps running.
     ed.run("code_area.set(Label(world.intern('def broken(:\\n')))");
-    ed.click("fixed_click_button('APPLY')");
+    ed.click("fixed_click_button('Apply')");
     ed.idle(3);
     assert!(texts(&ed).contains("ERROR"), "{}", texts(&ed));
     // A good one takes effect without a restart.
     let faster = shown.replace("vel.x * 0.1", "vel.x * 10");
     ed.run(&format!("code_area.set(Label(world.intern({faster:?})))"));
-    ed.click("fixed_click_button('APPLY')");
+    ed.click("fixed_click_button('Apply')");
     ed.idle(3);
     assert!(ed.eval::<Option<String>>("editor.error()").is_none());
     ed.click("b_step");
     ed.idle(2);
+    // One tick ran and the game is held there: the hero moved once.
+    assert_eq!(ed.project(|p| p.tick), 1);
     let live = ed.project(|p| p.live_scene().write());
-    assert!(live.contains("Position x=60.0"), "20 + 4*10: {live}");
+    assert!(live.contains("Position x=60.0 y=30.1"), "20 + 4*10: {live}");
 }
 
 #[test]
@@ -239,33 +242,112 @@ fn clicking_a_palette_block_adds_it_and_the_text_follows() {
     assert!(ed.eval::<bool>("not editor.stale()"));
 }
 
+/// Right-clicks a block's head (the `>` button of block `n`) and chooses a
+/// menu item.
+fn block_menu(ed: &Editor, n: u32, item: &str) {
+    ed.right_click_at(ed.center(&format!("handles[('pick', {n})]")));
+    ed.click(&format!("menu_row('{item}')"));
+    ed.idle(4);
+}
+
 #[test]
-fn block_buttons_delete_reorder_and_note() {
+fn the_block_menu_deletes_reorders_and_notes() {
     let ed = editor();
     tab(&ed, 2);
     let before = ed.eval::<String>("editor.source('game')");
+    // The head carries no row of little buttons any more.
+    assert!(!ed.eval::<bool>("('stmt', 2, 'up') in handles"));
     // Move the second statement up: they swap.
-    ed.click("handles[('stmt', 2, 'up')]");
-    ed.idle(4);
+    block_menu(&ed, 2, "Move Up");
     let swapped = ed.eval::<String>("editor.source('game')");
     assert!(
         swapped.find("pos.y +=").unwrap() < swapped.find("pos.x +=").unwrap(),
         "{swapped}"
     );
     // Add a note to the first statement, then delete it with its note.
-    ed.click("handles[('stmt', 1, 'note')]");
-    ed.idle(4);
+    block_menu(&ed, 1, "Add Note");
     let noted = ed.eval::<String>("editor.source('game')");
-    assert!(noted.contains("    # NOTE\n    pos.y +="), "{noted}");
-    ed.click("handles[('stmt', 1, 'del')]");
-    ed.idle(4);
+    assert!(noted.contains("    # New note\n    pos.y +="), "{noted}");
+    block_menu(&ed, 1, "Delete Block");
     let gone = ed.eval::<String>("editor.source('game')");
     assert!(
-        !gone.contains("NOTE") && !gone.contains("pos.y +="),
+        !gone.contains("New note") && !gone.contains("pos.y +="),
         "{gone}"
     );
     assert!(gone.contains("pos.x += vel.x * 0.1"));
     assert!(before.contains("pos.y += vel.y * 0.1"));
+}
+
+#[test]
+fn a_note_is_a_card_apart_from_its_stack_and_moves_on_its_own() {
+    let ed = editor();
+    tab(&ed, 2);
+    ed.idle(4);
+    let src = ed.eval::<String>("editor.source('game')");
+    // The note sits past the right edge of a narrow pane: scroll to it.
+    ed.run("handles['canvas'].set(ScrollCross(1, 140.0))");
+    ed.idle(4);
+    let [cx, _, cw, _] = ed.rect("handles[('card', 'move')]");
+    // The note about the first statement is a card to the right of the stack,
+    // with its own drag handle, and a line is drawn to its block.
+    let key = "handles[('note_grip', 'move', 'one tick is a sixtieth of a second')]";
+    let [gx, gy, gw, gh] = ed.rect(key);
+    assert!(
+        gx >= cx + cw,
+        "beside the stack: note {gx} stack {}",
+        cx + cw
+    );
+    assert!(
+        ed.eval::<u32>("ui.shape_count(notes_ui['canvas'])") > 0,
+        "the line to its block"
+    );
+    // Dragging the note changes where it sits and nothing in the source.
+    ed.drag(
+        [gx + gw / 2.0, gy + gh / 2.0],
+        [gx + gw / 2.0 + 20.0, gy + gh / 2.0 + 30.0],
+    );
+    ed.idle(4);
+    let [nx, ny, _, _] = ed.rect(key);
+    assert!(
+        nx > gx + 10.0 && ny > gy + 20.0,
+        "moved: {nx},{ny} from {gx},{gy}"
+    );
+    assert_eq!(ed.eval::<String>("editor.source('game')"), src);
+    // The stack did not move.
+    assert_eq!(ed.rect("handles[('card', 'move')]")[0], cx);
+}
+
+#[test]
+fn dragging_a_block_takes_the_blocks_below_it_and_bare_canvas_makes_a_new_stack() {
+    let ed = editor();
+    tab(&ed, 2);
+    ed.idle(4);
+    let [px, py, _, ph] = ed.rect("handles[('pick', 2)]");
+    let [x, y, w, h] = ed.rect("handles['canvas']");
+    // The second block goes out alone (nothing is below it).
+    ed.drag([px + 50.0, py + ph / 2.0], [x + w * 0.8, y + h - 30.0]);
+    ed.idle(4);
+    let src = ed.eval::<String>("editor.source('game')");
+    assert!(
+        src.contains("def stack_1():\n    pos.y += vel.y * 0.1"),
+        "{src}"
+    );
+    assert!(src.contains("pos.x += vel.x * 0.1"));
+    ed.idle(2);
+    // From a fresh stack, the first block dragged out takes the one below it.
+    let ed = editor();
+    tab(&ed, 2);
+    ed.idle(4);
+    let [px, py, _, ph] = ed.rect("handles[('pick', 1)]");
+    ed.drag([px + 50.0, py + ph / 2.0], [x + w * 0.8, y + h - 30.0]);
+    ed.idle(4);
+    let src = ed.eval::<String>("editor.source('game')");
+    assert!(
+        src.contains("def stack_1():\n    # one tick is a sixtieth of a second\n    pos.x += vel.x * 0.1\n    pos.y += vel.y * 0.1\n"),
+        "{src}"
+    );
+    // What was left behind is the hat and its docstring.
+    assert!(!src.contains("def move(pos: Position, vel: Velocity):\n    \"\"\"Add velocity to position, a little each tick.\"\"\"\n    #"), "{src}");
 }
 
 #[test]
@@ -334,11 +416,13 @@ fn dragging_a_palette_block_onto_a_statement_inserts_it_there() {
 }
 
 #[test]
-fn dragging_a_stacks_grip_saves_its_position_in_the_source() {
+fn dragging_a_stack_by_any_part_saves_its_position_in_the_source() {
     let ed = editor();
     tab(&ed, 2);
-    let [x, y, w, h] = ed.rect("handles[('grip', 'move')]");
-    let from = [x + w / 2.0, y + h / 2.0];
+    ed.idle(4);
+    // The hat's own words are not a control: pressing them takes the stack.
+    let [x, y, _, _] = ed.rect("handles[('card', 'move')]");
+    let from = [x + 6.0, y + 6.0];
     ed.drag(from, [from[0] + 30.0, from[1] + 20.0]);
     ed.idle(4);
     let src = ed.eval::<String>("editor.source('game')");
@@ -637,7 +721,7 @@ fn a_stack_whose_query_lost_a_component_greys_its_blocks_and_offers_a_fix() {
     ed.idle(4);
     tab(&ed, 2);
     assert!(
-        texts(&ed).contains("VELOCITY NOT IN QUERY"),
+        texts(&ed).contains("ADD VELOCITY TO THE QUERY"),
         "{}",
         texts(&ed)
     );
@@ -647,7 +731,7 @@ fn a_stack_whose_query_lost_a_component_greys_its_blocks_and_offers_a_fix() {
         ed.eval::<String>("editor.source('game')")
             .contains("Position, Velocity'")
     );
-    assert!(!texts(&ed).contains("NOT IN QUERY"));
+    assert!(!texts(&ed).contains("TO THE QUERY"));
 }
 
 #[test]
@@ -997,10 +1081,10 @@ fn blocks_are_named_for_a_screen_reader() {
     tab(&ed, 2);
     let outline = ed.access_outline();
     assert!(
-        outline.contains("BLOCK 1: POS.X += VEL.X * 0.1"),
+        outline.contains("Block 1: pos.x += vel.x * 0.1"),
         "{outline}"
     );
-    assert!(outline.contains("END OF BODY BODY"), "{outline}");
+    assert!(outline.contains("End of body body"), "{outline}");
 }
 
 /// A point on the left padding of the value box `expr` evaluates to: a drop
@@ -1127,21 +1211,21 @@ fn a_list_of_lists_is_an_editable_grid_that_grows_by_row_and_column() {
     with_source(&ed, GRIDS);
     tab(&ed, 2);
     assert!(texts(&ed).contains("GRID 2X2"), "{}", texts(&ed));
-    ed.click("handles[('grid', '+ROW')]");
+    ed.click("handles[('grid', '+ Row')]");
     ed.idle(4);
     assert!(
         ed.eval::<String>("editor.source('game')")
             .contains("tiles: list[list[int]] = [[1, 0], [0, 1], [0, 0]]")
     );
     assert!(texts(&ed).contains("GRID 3X2"));
-    ed.click("handles[('grid', '+COL')]");
+    ed.click("handles[('grid', '+ Col')]");
     ed.idle(4);
     assert!(
         ed.eval::<String>("editor.source('game')")
             .contains("[[1, 0, 0], [0, 1, 0], [0, 0, 0]]")
     );
-    ed.click("handles[('grid', '-ROW')]");
-    ed.click("handles[('grid', '-COL')]");
+    ed.click("handles[('grid', '- Row')]");
+    ed.click("handles[('grid', '- Col')]");
     ed.idle(4);
     assert!(
         ed.eval::<String>("editor.source('game')")
@@ -1247,4 +1331,178 @@ fn suggestions_narrow_to_what_fits_the_selected_slot_unless_the_project_opts_out
         ed.project(|p| p.settings_text())
             .contains("suggest_by_type off")
     );
+}
+
+#[test]
+fn a_dragged_block_keeps_its_size_all_the_way() {
+    use sage_platform::ui_window::UiTickInput;
+    let ed = editor();
+    tab(&ed, 2);
+    ed.idle(4);
+    let [px, py, _, ph] = ed.rect("handles[('pick', 1)]");
+    let start = [px + 50.0, py + ph / 2.0];
+    let mut sizes = vec![];
+    for step in 0..12 {
+        let t = step as f32;
+        ed.input(&UiTickInput {
+            // Fractional steps, as a real mouse gives: each edge is snapped to
+            // whole units on its own, so a block at a fractional position
+            // changes size from tick to tick.
+            pointer: Some([start[0] + 12.37 * t, start[1] + 9.21 * t]),
+            down: true,
+            ..UiTickInput::default()
+        });
+        if ed.eval::<bool>("tower.get('kind') == 'chain'") {
+            sizes.push(ed.eval::<Vec<f32>>(
+                "[v for c in tower['cols'] for v in (c.get(Rect).w, c.get(Rect).h)]",
+            ));
+        }
+    }
+    assert!(sizes.len() >= 6, "the drag started: {}", sizes.len());
+    // One size from the first tick of the drag to the last, for both blocks.
+    for s in &sizes[1..] {
+        assert_eq!(s, &sizes[1], "the size changed mid-drag: {sizes:?}");
+    }
+    // Where the pointer goes, the block follows in whole units.
+    let at = ed.eval::<Vec<f32>>("[c for c in (tower['abs'][0],) for c in c]");
+    assert!(at.iter().all(|v| v.fract() == 0.0), "{at:?}");
+    assert_eq!(sizes[1].len(), 4, "the block and the one below it");
+}
+
+#[test]
+fn dragged_blocks_stay_under_the_cursor_and_escape_puts_them_back() {
+    use sage_platform::ui_window::UiTickInput;
+    let ed = editor();
+    tab(&ed, 2);
+    ed.idle(4);
+    let before = ed.eval::<String>("editor.source('game')");
+    let [px, py, _, ph] = ed.rect("handles[('pick', 1)]");
+    let start = [px + 50.0, py + ph / 2.0];
+    let mut p = start;
+    for step in 0..10 {
+        p = [start[0] + 11.0 * step as f32, start[1] + 8.0 * step as f32];
+        ed.input(&UiTickInput {
+            pointer: Some(p),
+            down: true,
+            ..UiTickInput::default()
+        });
+    }
+    let r = ed.eval::<Vec<f32>>(
+        "[tower['cols'][0].get(Rect).x, tower['cols'][0].get(Rect).y, tower['cols'][0].get(Rect).w, tower['cols'][0].get(Rect).h]",
+    );
+    // The pointer is inside the carried block, where it was held.
+    assert!(
+        p[0] > r[0] && p[0] < r[0] + r[2] && p[1] > r[1] && p[1] < r[1] + r[3],
+        "pointer {p:?} block {r:?}"
+    );
+    // Esc while carrying: nothing changes, and the blocks are back in place.
+    ed.input(&UiTickInput {
+        pointer: Some(p),
+        down: true,
+        nav: NAV_CANCEL,
+        ..UiTickInput::default()
+    });
+    ed.input(&UiTickInput {
+        pointer: Some(p),
+        ..UiTickInput::default()
+    });
+    ed.idle(4);
+    assert_eq!(ed.eval::<String>("editor.source('game')"), before);
+    assert!(ed.eval::<bool>("tower.get('kind') is None"));
+    let [qx, qy, _, _] = ed.rect("handles[('pick', 1)]");
+    assert_eq!([qx, qy], [px, py], "back where it was");
+}
+
+#[test]
+fn a_dragged_block_is_held_where_it_was_grabbed_without_trailing_the_cursor() {
+    use sage_platform::ui_window::UiTickInput;
+    // Grabbed near its left end, then near its middle: the offset is the
+    // one from the press, whichever it was, and does not grow with speed.
+    for hold in [[6.0, 4.0], [120.0, 20.0]] {
+        let ed = editor();
+        tab(&ed, 2);
+        ed.idle(4);
+        let head = ed.eval::<Vec<f32>>(
+            "[c for h in [handles[('pick', 1)].parent] for c in (h.get(Rect).x, h.get(Rect).y)]",
+        );
+        let start = [head[0] + hold[0], head[1] + hold[1]];
+        for step in 0..14 {
+            // Fast and steady: 25 units a tick.
+            let t = step as f32;
+            let p = [start[0] + 25.0 * t, start[1] + 18.0 * t];
+            ed.input(&UiTickInput {
+                pointer: Some(p),
+                down: true,
+                ..UiTickInput::default()
+            });
+            if step >= 6 {
+                let r = ed.eval::<Vec<f32>>(
+                    "[tower['cols'][0].get(Rect).x, tower['cols'][0].get(Rect).y]",
+                );
+                let held = [p[0] - r[0], p[1] - r[1]];
+                assert!(
+                    (held[0] - hold[0]).abs() <= 1.5 && (held[1] - hold[1]).abs() <= 1.5,
+                    "step {step}: held at {held:?}, grabbed at {hold:?}"
+                );
+            }
+        }
+    }
+}
+
+#[test]
+fn a_stack_is_deleted_from_its_hat_menu_and_undo_brings_it_back() {
+    let ed = editor();
+    tab(&ed, 2);
+    ed.idle(4);
+    let before = ed.eval::<String>("editor.source('game')");
+    let [x, y, _, _] = ed.rect("handles[('card', 'move')]");
+    // Delete takes the whole stack, notes and all, without asking: it is one
+    // step on the undo stack.
+    ed.right_click_at([x + 8.0, y + 8.0]);
+    ed.idle(1);
+    ed.click("menu_row('Delete Stack', True)");
+    ed.idle(4);
+    let after = ed.eval::<String>("editor.source('game')");
+    assert!(
+        !after.contains("def move") && !after.contains("pos.x +="),
+        "{after}"
+    );
+    assert!(
+        !after.contains("Moves everything that has a velocity"),
+        "its note goes too: {after}"
+    );
+    assert!(after.contains("hero = world.entity"), "the rest stays");
+    assert!(!ed.eval::<bool>("('card', 'move') in handles"));
+    assert!(texts(&ed).contains("UNDO (CTRL+Z) BRINGS IT BACK"), "{}", texts(&ed));
+    // Undo is one stack for the scene and the scripts.
+    ed.click("b_undo");
+    ed.idle(4);
+    assert_eq!(ed.eval::<String>("editor.source('game')"), before);
+    assert!(texts(&ed).contains("UNDID: DELETE STACK MOVE"), "{}", texts(&ed));
+}
+
+#[test]
+fn while_playing_the_inspector_shows_live_values_and_keep_makes_one_authored() {
+    let ed = editor();
+    select(&ed, 1);
+    assert!(texts(&ed).contains("EDITING"));
+    // Provenance: the hero's position is written by the `move` system.
+    assert!(texts(&ed).contains("WRITTEN BY MOVE"), "{}", texts(&ed));
+    ed.click("b_play");
+    ed.idle(20);
+    let t = texts(&ed);
+    assert!(t.contains("PLAYING") && t.contains("RUNNING: LIVE VALUES"), "{t}");
+    assert!(t.contains("AUTHORED 20.0"), "the authored value is beside the live one: {t}");
+    assert_eq!(field(&ed, "Position", "x"), "20.0", "playing changes nothing authored");
+    ed.click("b_pause");
+    ed.idle(8);
+    assert!(texts(&ed).contains("PAUSED"));
+    let live = ed.eval::<String>("text_of(handles[('live', 'Position', 'x')])");
+    assert_ne!(live, "20.0");
+    ed.click("handles[('keep', 'Position', 'x')]");
+    ed.idle(3);
+    ed.click("b_play");
+    ed.idle(4);
+    assert_eq!(field(&ed, "Position", "x"), live, "the kept value is authored now");
+    assert_eq!(field(&ed, "Position", "y"), "30.0", "nothing else was kept");
 }

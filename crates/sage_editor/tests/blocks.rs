@@ -10,3 +10,23 @@ fn the_block_model_passes_its_python_tests() {
     .unwrap();
     assert!(failures.is_empty(), "{failures}");
 }
+
+#[test]
+fn the_command_registry_passes_its_python_tests() {
+    let failures = sage_editor::blocks::run_python_tests(
+        "test_commands",
+        include_str!("../../../python/tests/test_commands.py"),
+    )
+    .unwrap();
+    assert!(failures.is_empty(), "{failures}");
+}
+
+#[test]
+fn the_provenance_analysis_passes_its_python_tests() {
+    let failures = sage_editor::blocks::run_python_tests(
+        "test_provenance",
+        include_str!("../../../python/tests/test_provenance.py"),
+    )
+    .unwrap();
+    assert!(failures.is_empty(), "{failures}");
+}

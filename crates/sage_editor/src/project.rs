@@ -10,11 +10,18 @@
 //!   the running world alone and reports the error.
 
 use crate::document::Document;
+use crate::history::{SourceChange, Step};
 use flecs_ecs::prelude::*;
 use sage_core::TICK_DT;
 use sage_ecs_py::{Ecs, Policy, Snapshot};
 use sage_scene::Scene;
 use sage_script::Script;
+use std::path::Path;
+
+/// The authored scene of a project directory.
+pub const SCENE_FILE: &str = "scene.sage";
+/// The editor's settings for a project (one `key value` per line).
+pub const SETTINGS_FILE: &str = "settings.sage";
 
 /// Fields drop in order: the binding, the scripts, then the world.
 pub struct Runtime {
@@ -50,6 +57,9 @@ pub struct Project {
     pub stale: bool,
     /// Run scripts instrumented, so blocks can glow while they execute.
     pub instrument: bool,
+    /// The scripts as last opened or saved, to know when there is something
+    /// to save.
+    saved_sources: Vec<(String, String)>,
     runtime: Runtime,
     backup: Option<Snapshot>,
     prepare: Prepare,
@@ -114,6 +124,7 @@ impl Project {
         Ok(Project {
             name: name.to_string(),
             settings: Default::default(),
+            saved_sources: sources.clone(),
             sources,
             doc,
             mode: Mode::Edit,
@@ -128,6 +139,57 @@ impl Project {
             seed,
             module: module.to_string(),
         })
+    }
+
+    /// Opens a project directory: every `*.py` file in name order, the scene
+    /// in `scene.sage` if there is one, and the settings in `settings.sage`.
+    pub fn open_dir(dir: &Path, prepare: Prepare) -> Result<Project, String> {
+        let read = |p: &Path| std::fs::read_to_string(p).map_err(|e| format!("{}: {e}", p.display()));
+        let mut files: Vec<_> = std::fs::read_dir(dir)
+            .map_err(|e| format!("{}: {e}", dir.display()))?
+            .filter_map(|e| e.ok())
+            .map(|e| e.path())
+            .filter(|p| p.extension().is_some_and(|x| x == "py"))
+            .collect();
+        files.sort();
+        if files.is_empty() {
+            return Err(format!("{} has no .py files", dir.display()));
+        }
+        let mut sources = vec![];
+        for p in files {
+            let name = p.file_stem().unwrap_or_default().to_string_lossy().to_string();
+            sources.push((name, read(&p)?));
+        }
+        // A project without a scene or settings file is a new one.
+        let scene = std::fs::read_to_string(dir.join(SCENE_FILE)).ok();
+        let name = dir
+            .file_name()
+            .map_or("project".into(), |n| n.to_string_lossy().to_string());
+        let mut project = Project::open(&name, sources, scene.as_deref(), prepare)?;
+        if let Ok(text) = std::fs::read_to_string(dir.join(SETTINGS_FILE)) {
+            project.load_settings(&text);
+        }
+        Ok(project)
+    }
+
+    /// Writes the scripts, the scene and (when any was set) the settings
+    /// into `dir`, and marks the document saved.
+    pub fn save_dir(&mut self, dir: &Path) -> Result<(), String> {
+        let write = |name: &str, text: &str| {
+            let path = dir.join(name);
+            std::fs::write(&path, text).map_err(|e| format!("{}: {e}", path.display()))
+        };
+        std::fs::create_dir_all(dir).map_err(|e| format!("{}: {e}", dir.display()))?;
+        for (name, text) in &self.sources {
+            write(&format!("{name}.py"), text)?;
+        }
+        write(SCENE_FILE, &self.doc.scene.write())?;
+        if !self.settings.is_empty() {
+            write(SETTINGS_FILE, &self.settings_text())?;
+        }
+        self.doc.mark_saved();
+        self.saved_sources = self.sources.clone();
+        Ok(())
     }
 
     pub fn ecs(&self) -> &Ecs {
@@ -178,18 +240,64 @@ impl Project {
             .map(|(_, s)| s.as_str())
     }
 
-    /// Changes a script's text. It takes effect at the next `reload`.
+    /// Changes a script's text as one undoable step. It takes effect at the
+    /// next `reload`.
     pub fn set_source(&mut self, name: &str, text: &str) -> Result<(), String> {
+        self.edit_source(name, text, &format!("Edit {name}.py"))
+    }
+
+    /// [`Project::set_source`] with the step's name ("Delete stack move").
+    pub fn edit_source(&mut self, name: &str, text: &str, label: &str) -> Result<(), String> {
+        let before = self.put_source(name, text)?;
+        let change = SourceChange {
+            name: name.to_string(),
+            before,
+            after: text.to_string(),
+        };
+        self.doc.history.record_source(label, change);
+        Ok(())
+    }
+
+    /// Gives a script new text without making history. Returns the old text.
+    fn put_source(&mut self, name: &str, text: &str) -> Result<String, String> {
         let slot = self
             .sources
             .iter_mut()
             .find(|(n, _)| n == name)
             .ok_or_else(|| format!("no script {name}"))?;
         if slot.1 != text {
-            slot.1 = text.to_string();
             self.stale = true;
+            self.doc.revision += 1;
         }
-        Ok(())
+        Ok(std::mem::replace(&mut slot.1, text.to_string()))
+    }
+
+    /// Takes back the last step, whether it changed the scene, a script or
+    /// both. A script that changed is reloaded at the next `reload`.
+    pub fn undo(&mut self) -> Option<Step> {
+        let step = self.doc.undo()?;
+        self.finish(step)
+    }
+
+    pub fn redo(&mut self) -> Option<Step> {
+        let step = self.doc.redo()?;
+        self.finish(step)
+    }
+
+    /// The scripts' half of an undo or redo.
+    fn finish(&mut self, step: Step) -> Option<Step> {
+        for (name, text) in &step.sources {
+            // The script was there when the step was recorded; scripts are
+            // never removed from an open project.
+            let _ = self.put_source(name, text);
+        }
+        Some(step)
+    }
+
+    /// There is something to save: the scene or a script differs from what
+    /// was last opened or saved.
+    pub fn dirty(&self) -> bool {
+        self.doc.dirty() || self.sources != self.saved_sources
     }
 
     /// Live reload: runs the sources in a new world and carries the scene
@@ -227,14 +335,18 @@ impl Project {
         scene
             .conform(&schemas, Policy::Lenient)
             .map_err(|e| format!("scene: {e}"))?;
-        let selection = self.doc.selection;
+        // A scene difference recorded under other fields cannot be applied
+        // to this scene: when the components changed shape, the scene edits
+        // before now become permanent. Script edits stay undoable.
+        if schemas != self.doc.schemas && self.doc.history.drop_scene_steps() > 0 {
+            self.warnings
+                .push("Components changed: earlier scene edits can no longer be undone".into());
+        }
         self.runtime = fresh;
         self.doc.schemas = schemas;
         self.doc.scene = scene;
-        self.doc.selection = selection;
         self.doc.unsynced = false;
-        self.doc.history.clear();
-        self.doc.select(selection);
+        self.doc.select(self.doc.selection);
         self.error = None;
         self.stale = false;
         Ok(())

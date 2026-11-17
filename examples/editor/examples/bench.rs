@@ -3,6 +3,7 @@
 //! `cargo run --release -p editor --example bench`
 
 use editor::*;
+use sage_app::UiHosted;
 use std::time::Instant;
 fn main() {
     let ed = Editor::new(sample_project().unwrap(), None).unwrap();
@@ -38,7 +39,7 @@ fn main() {
     ed.click("tab_buttons[0]");
     ed.idle(3);
     t("ui_frame (compose draws)", 20, &|| {
-        let _ = ed.ui_frame();
+        let _ = ed.frame();
     });
     t("live reload (a block edit does this)", 10, &|| {
         ed.run("editor.set_source('game', editor.source('game') + '\\n')");

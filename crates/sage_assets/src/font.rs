@@ -452,6 +452,8 @@ const GLYPHS: &[(char, [&str; 7])] = &[
     (',', [BLANK, BLANK, BLANK, BLANK, "..#..", "..#..", ".#..."]),
     ('-', [BLANK, BLANK, BLANK, "#####", BLANK, BLANK, BLANK]),
     ('+', [BLANK, "..#..", "..#..", "#####", "..#..", "..#..", BLANK]),
+    // The password mask: without it a masked field draws nothing.
+    ('*', [BLANK, "#.#.#", ".###.", "#####", ".###.", "#.#.#", BLANK]),
     ('=', [BLANK, BLANK, "#####", BLANK, "#####", BLANK, BLANK]),
     ('!', ["..#..", "..#..", "..#..", "..#..", "..#..", BLANK, "..#.."]),
     ('?', [".###.", "#...#", "....#", "...#.", "..#..", BLANK, "..#.."]),
@@ -465,6 +467,17 @@ const GLYPHS: &[(char, [&str; 7])] = &[
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_password_mask_has_a_glyph() {
+        let f = BitmapFont::builtin();
+        // '*' is cell 10 (column 10, row 0): it must have ink.
+        let inked = (0..8)
+            .flat_map(|y| (0..8).map(move |x| (x, y)))
+            .filter(|&(x, y)| f.atlas.pixel(10 * 8 + x, y)[3] == 255)
+            .count();
+        assert!(inked >= 10, "{inked}");
+    }
 
     #[test]
     fn every_glyph_row_is_five_wide_and_cells_are_unique() {

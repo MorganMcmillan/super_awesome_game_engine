@@ -23,6 +23,20 @@ pub struct RunTrace {
     pub hashes: Vec<u64>,
 }
 
+impl RunTrace {
+    /// The trace as text, one hash per line: `initial <hash>`, then
+    /// `<tick> <hash>` for every tick from 1. Two runs are the same when
+    /// their texts are (what `replay --hashes` writes, and what the
+    /// cross-process replay tests compare).
+    pub fn to_text(&self) -> String {
+        let mut s = format!("initial {:#018x}\n", self.initial);
+        for (i, h) in self.hashes.iter().enumerate() {
+            s.push_str(&format!("{} {h:#018x}\n", i + 1));
+        }
+        s
+    }
+}
+
 /// Runs `sim` over every tick of `recording` and records the hash after each.
 pub fn run_recording<S: Simulation>(sim: &mut S, recording: &InputRecording) -> RunTrace {
     let initial = sim.state_hash();
@@ -88,6 +102,18 @@ where
 mod tests {
     use super::*;
     use crate::hash::StateHasher;
+
+    #[test]
+    fn a_trace_as_text_has_the_initial_hash_then_one_line_per_tick() {
+        let t = RunTrace {
+            initial: 1,
+            hashes: vec![0xab, 0xcd],
+        };
+        assert_eq!(
+            t.to_text(),
+            "initial 0x0000000000000001\n1 0x00000000000000ab\n2 0x00000000000000cd\n"
+        );
+    }
     use std::collections::HashMap;
 
     struct Counter {

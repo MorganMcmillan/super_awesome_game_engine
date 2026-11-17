@@ -235,6 +235,28 @@ impl Ecs {
         source: &str,
         extra: Vec<(String, Py<PyAny>)>,
     ) -> Result<Script, ScriptError> {
+        self.loading(extra, |globals| Script::load_with(name, source, globals))
+    }
+
+    /// Loads one script written as several files (`(part name, source)` in
+    /// order): the parts share one namespace, as if they were one file.
+    pub fn load_parts(
+        &self,
+        name: &str,
+        parts: &[(&str, &str)],
+        extra: Vec<(String, Py<PyAny>)>,
+    ) -> Result<Script, ScriptError> {
+        self.loading(extra, |globals| Script::load_parts(name, parts, globals))
+    }
+
+    /// Runs `load` with this world as the one being loaded into: `world` is
+    /// in the script's globals, native imports resolve against it, and what
+    /// the script registers lands in this world's scope.
+    fn loading(
+        &self,
+        extra: Vec<(String, Py<PyAny>)>,
+        load: impl FnOnce(Vec<(String, Py<PyAny>)>) -> Result<Script, ScriptError>,
+    ) -> Result<Script, ScriptError> {
         let world_obj = Python::attach(|py| {
             self.reg
                 .world_obj
@@ -252,7 +274,7 @@ impl Ecs {
         self.reg.push_scope();
         let mut globals = vec![("world".to_string(), world_obj)];
         globals.extend(extra);
-        let result = Script::load_with(name, source, globals);
+        let result = load(globals);
         self.reg.pop_scope();
         self.reg.invalidate_views();
         Python::attach(|py| {

@@ -316,6 +316,9 @@ pub struct UiEvents {
     pub middle: bool,
     chord: Option<[u32; 2]>,
     wheel: f32,
+    /// Sideways wheel notches (a touchpad's horizontal swipe); positive is
+    /// towards the right.
+    wheel_x: f32,
     typed: VecDeque<char>,
     composing: String,
 }
@@ -395,7 +398,12 @@ impl UiEvents {
             }
             // SDL's wheel is positive away from the user (scroll up); the UI
             // counts positive as content moving down.
-            Event::MouseWheel { y, .. } => self.wheel -= *y,
+            // A sideways swipe is kept apart: `tick` turns it into the wheel
+            // with Shift held, which is how the UI scrolls across the flow.
+            Event::MouseWheel { x, y, .. } => {
+                self.wheel -= *y;
+                self.wheel_x += *x;
+            }
             Event::TextInput { text, .. } => {
                 self.typed.extend(text.chars());
                 // What was being composed is now committed.
@@ -415,6 +423,17 @@ impl UiEvents {
     /// coordinates to UI units), one typed character, and the wheel since
     /// the last tick. `nav` is the sampled `NAV_*` bits.
     pub fn tick(&mut self, nav: u32, to_ui: impl Fn([f32; 2]) -> [f32; 2]) -> UiTickInput {
+        // One axis per tick, whichever moved more, so the recorded input
+        // (one wheel number and the Shift bit) holds it without a new format.
+        let (wheel, wheel_x) = (
+            std::mem::take(&mut self.wheel),
+            std::mem::take(&mut self.wheel_x),
+        );
+        let (wheel, nav) = if wheel_x.abs() > wheel.abs() {
+            (wheel_x, nav | NAV_SHIFT)
+        } else {
+            (wheel, nav)
+        };
         UiTickInput {
             pointer: self.inside.then(|| to_ui(self.mouse)),
             down: self.down,
@@ -423,7 +442,7 @@ impl UiEvents {
             chord: self.chord.take(),
             nav,
             ch: self.typed.pop_front(),
-            wheel: std::mem::take(&mut self.wheel),
+            wheel,
             paste: None,
             composing: self.composing.clone(),
         }
@@ -876,6 +895,25 @@ mod tests {
         e.handle(&wheel(-0.5));
         assert_eq!(e.tick(0, id).wheel, -1.5);
         assert_eq!(e.tick(0, id).wheel, 0.0, "consumed");
+        // A sideways swipe is the wheel with Shift held; the bigger axis wins.
+        let swipe = |x, y| Event::MouseWheel {
+            timestamp: 0,
+            window_id: 0,
+            which: 0,
+            x,
+            y,
+            direction: sdl3::mouse::MouseWheelDirection::Normal,
+            mouse_x: 0.0,
+            mouse_y: 0.0,
+            integer_x: 0,
+            integer_y: 0,
+        };
+        e.handle(&swipe(2.0, 0.5));
+        let t = e.tick(0, id);
+        assert_eq!((t.wheel, t.nav & NAV_SHIFT), (2.0, NAV_SHIFT));
+        e.handle(&swipe(0.5, 2.0));
+        let t = e.tick(0, id);
+        assert_eq!((t.wheel, t.nav & NAV_SHIFT), (-2.0, 0));
     }
 }
 

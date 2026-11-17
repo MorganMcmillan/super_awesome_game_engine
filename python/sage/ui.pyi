@@ -520,6 +520,13 @@ class Select(Component):
     def __init__(self, value: i32 = ..., count: u32 = ..., popup: u64 = ..., label: u64 = ...) -> None: ...
 
 
+class Selectable(Component):
+    """Native component `sage.ui.Selectable`."""
+
+    anchor: u32
+    def __init__(self, anchor: u32 = ...) -> None: ...
+
+
 class Selected(Component):
     """Native component `sage.ui.Selected`."""
 

@@ -2,9 +2,12 @@
 //!
 //! Design doc 8.1 and 8.2: no rigid-body engine; parry provides shapes and
 //! narrow-phase queries; contacts are rows in a table, and begin/stay/end are
-//! set operations between the current and previous tick.
+//! set operations between the current and previous tick. `ecs` puts the
+//! vocabulary and the detection system into a Flecs world (Pong and the
+//! platformer kit share it).
 
 pub mod detect;
+pub mod ecs;
 pub mod table;
 
 pub use detect::{BoxCollider, brute_force_pairs, detect};

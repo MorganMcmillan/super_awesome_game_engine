@@ -5,6 +5,7 @@ use sage_core::host::{
     NAV_WORD, UiDraw,
 };
 use sage_ecs_py::Policy;
+use sage_app::UiHosted;
 use sage_platform::ui_window::UiTickInput;
 use ui_playground::{Bouncer, Playground, SCREEN};
 
@@ -34,7 +35,7 @@ fn focus(p: &Playground) -> u64 {
 }
 
 fn texts(p: &Playground) -> Vec<String> {
-    p.ui_frame()
+    p.frame()
         .draws
         .into_iter()
         .filter_map(|d| match d {
@@ -356,7 +357,7 @@ fn the_playground_is_deterministic_and_survives_a_save_game() {
 // ---- the STYLE page ------------------------------------------------------------
 
 fn draws(p: &Playground) -> Vec<UiDraw> {
-    p.ui_frame().draws
+    p.frame().draws
 }
 
 #[test]
@@ -893,7 +894,7 @@ fn a_password_shows_asterisks_and_will_not_copy() {
 fn a_text_area_wraps_takes_enter_and_moves_by_row() {
     let p = texty();
     let rows_of = |p: &Playground| {
-        p.ui_frame()
+        p.frame()
             .draws
             .iter()
             .filter(|d| matches!(d, UiDraw::Text { text, .. } if text.len() > 6 && !text.contains(':') && text.chars().all(|c| c.is_uppercase() || c == ' ' || c == '.')))
@@ -964,7 +965,7 @@ fn the_text_page_survives_a_save_game_with_a_selection_and_history() {
 #[test]
 fn rich_text_draws_styled_runs_and_a_link_click_navigates() {
     let p = texty();
-    let draws = p.ui_frame().draws;
+    let draws = p.frame().draws;
     let run = |word: &str| {
         draws.iter().find_map(|d| match d {
             UiDraw::Text {
@@ -1027,6 +1028,37 @@ fn rich_text_draws_styled_runs_and_a_link_click_navigates() {
             "{from:?} to {to:?}"
         );
     }
+}
+
+#[test]
+fn text_is_selected_by_the_pointer_and_copied_only_once_it_is_made_selectable() {
+    let p = texty();
+    let [x, y, _, _] = p.rect("quote_text");
+    let at = |col: f32| [x + 6.0 * col + 0.5, y + 4.0];
+    // Plain text ignores a drag.
+    let plain = p.rect("quote_said_plain");
+    p.drag(
+        [plain[0] + 1.0, plain[1] + 1.0],
+        [plain[0] + 30.0, plain[1] + 1.0],
+    );
+    p.press(NAV_COPY);
+    assert_eq!(p.clipboard(), "");
+    // The selectable paragraph: drag across "PLAIN TEXT".
+    p.drag(at(0.0), at(10.0));
+    assert_eq!(
+        p.eval::<(u32, u32)>("(quote_text.get(Selectable).anchor, quote_text.get(Caret).pos)"),
+        (0, 10)
+    );
+    p.press(NAV_COPY);
+    assert_eq!(p.clipboard(), "PLAIN TEXT");
+    // A double click takes the word under it; a press elsewhere clears it.
+    p.click_at(at(1.5));
+    p.click_at(at(1.5));
+    p.press(NAV_COPY);
+    assert_eq!(p.clipboard(), "PLAIN");
+    let far = p.rect("email_field");
+    p.click_at([far[0] + 2.0, far[1] + 2.0]);
+    assert!(p.eval::<bool>("quote_text.get(Selectable).anchor == quote_text.get(Caret).pos"));
 }
 
 #[test]
@@ -1458,6 +1490,59 @@ fn dragging_a_row_onto_another_reorders_the_list() {
     assert_eq!(items(&p), ["DELTA", "BRAVO", "CHARLIE", "ALPHA"]);
     p.drag(p.center(&row(1)), p.center(&row(1)));
     assert_eq!(items(&p), ["DELTA", "BRAVO", "CHARLIE", "ALPHA"]);
+}
+
+#[test]
+fn a_line_shows_where_a_dragged_row_will_land() {
+    let p = dragged();
+    let bar = "sort_list.children[4]";
+    assert!(!shown(&p, bar), "hidden until a row is held over another");
+    let hold = |from: usize, to: usize| {
+        let c = p.center(&format!("sort_list.children[{from}]"));
+        let at = p.center(&format!("sort_list.children[{to}]"));
+        // The line is placed after the tick that finds the drag, and laid
+        // out on the next, so the pointer stays a tick longer.
+        for (pos, down) in [
+            (c, true),
+            ([c[0], c[1] + 5.0], true),
+            (at, true),
+            (at, true),
+        ] {
+            p.input(&UiTickInput {
+                pointer: Some(pos),
+                down,
+                ..UiTickInput::default()
+            });
+        }
+    };
+    let edge = |k: usize, bottom: bool| {
+        let r = p.eval::<(f32, f32)>(&format!(
+            "(sort_list.children[{k}].get(Rect).y, sort_list.children[{k}].get(Rect).h)"
+        ));
+        if bottom { r.0 + r.1 } else { r.0 }
+    };
+    let line_y = || p.eval::<f32>(&format!("{bar}.get(Rect).y + {bar}.get(Rect).h / 2"));
+    // Going down, the row lands after the one it is over.
+    hold(0, 2);
+    assert!(shown(&p, bar));
+    assert!(
+        (line_y() - edge(2, true)).abs() <= 1.5,
+        "{} vs {}",
+        line_y(),
+        edge(2, true)
+    );
+    p.input(&UiTickInput::default());
+    p.idle(1);
+    assert!(!shown(&p, bar), "gone when the drag ends");
+    // Going up, it lands before.
+    hold(3, 1);
+    assert!(shown(&p, bar));
+    assert!(
+        (line_y() - edge(1, false)).abs() <= 1.5,
+        "{} vs {}",
+        line_y(),
+        edge(1, false)
+    );
 }
 
 #[test]
@@ -2655,8 +2740,8 @@ fn a_truetype_face_draws_lower_case_and_antialiased_text_when_one_is_given() {
 
 #[test]
 fn a_native_file_field_asks_the_host_for_its_dialog_and_takes_the_answer() {
-    use sage_platform::ui_window::{FileRequest, UiApp};
-    let mut p = picking();
+    use sage_platform::ui_window::FileRequest;
+    let p = picking();
     assert_eq!(p.take_file_request(), None, "nothing asked yet");
     p.click("native_pick");
     p.idle(1);
@@ -2748,11 +2833,10 @@ fn dragging_a_header_grip_gives_a_table_column_a_width() {
 
 #[test]
 fn assistive_technology_can_focus_and_press_controls_like_the_pointer_would() {
-    use sage_platform::ui_window::UiApp;
-    let mut p = Playground::new().unwrap();
+    let p = Playground::new().unwrap();
     p.show_page("PANELS");
     // Ask through the accesskit request, as the platform adapter would.
-    let request = |p: &mut Playground, var: &str, action| {
+    let request = |p: &Playground, var: &str, action| {
         let id = p.eval::<u64>(&format!("{var}.sid"));
         p.access_action(accesskit::ActionRequest {
             action,
@@ -2764,17 +2848,17 @@ fn assistive_technology_can_focus_and_press_controls_like_the_pointer_would() {
     };
     // Click a switch: it flips; a second click flips it back.
     assert_eq!(p.eval::<u32>("label_switch.get(Toggle).on"), 0);
-    request(&mut p, "label_switch", accesskit::Action::Click);
+    request(&p, "label_switch", accesskit::Action::Click);
     assert_eq!(p.eval::<u32>("label_switch.get(Toggle).on"), 1);
-    request(&mut p, "label_switch", accesskit::Action::Click);
+    request(&p, "label_switch", accesskit::Action::Click);
     assert_eq!(p.eval::<u32>("label_switch.get(Toggle).on"), 0);
     // Focus a text box and type into it.
-    request(&mut p, "label_name", accesskit::Action::Focus);
+    request(&p, "label_name", accesskit::Action::Focus);
     assert_eq!(focus(&p), p.eval::<u64>("label_name.sid"));
     p.type_text("hi");
     assert_eq!(p.text("label_name"), "hi");
     // A button's click reaches its observers.
-    request(&mut p, "form_ok", accesskit::Action::Click);
+    request(&p, "form_ok", accesskit::Action::Click);
     assert_eq!(p.text("form_said"), "1 PROBLEMS");
     // Actions the UI does not do are refused, and a disabled control ignores them.
     assert!(!sage_ui::perform_access_action(
@@ -2783,7 +2867,7 @@ fn assistive_technology_can_focus_and_press_controls_like_the_pointer_would() {
         accesskit::Action::ScrollDown
     ));
     p.run("label_switch.set(Widget(2, 0, 0, 0))");
-    request(&mut p, "label_switch", accesskit::Action::Click);
+    request(&p, "label_switch", accesskit::Action::Click);
     assert_eq!(p.eval::<u32>("label_switch.get(Toggle).on"), 0);
     // The tree the adapter is given is the same one: it names the controls.
     let u = p.access_tree();

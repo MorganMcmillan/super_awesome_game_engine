@@ -13,58 +13,13 @@
 use std::process::ExitCode;
 
 use pong::{GameState, LEFT_DOWN, LEFT_UP, Pong, PongConfig, RIGHT_DOWN, RIGHT_UP, Shown, Side};
-use sage_assets::{AssetKind, AssetStore, Image, Sound};
+use sage_app::cli::{self, Args};
+use sage_assets::{AssetStore, generated};
 use sage_core::host::DrawKind;
-use sage_core::{InputRecording, Simulation, run_recording};
+use sage_core::{InputRecording, Simulation};
 use sage_platform::{
     Binding, InputMap, Key, PadAxis, PadButton, RendererChoice, WindowOptions, run_windowed,
 };
-
-struct Args {
-    cmd: String,
-    file: Option<String>,
-    seed: u64,
-    record: Option<String>,
-    hashes: Option<String>,
-    frames: u64,
-    renderer: RendererChoice,
-    mute: bool,
-}
-
-fn parse() -> Result<Args, String> {
-    let mut it = std::env::args().skip(1);
-    let mut a = Args {
-        cmd: it.next().unwrap_or_else(|| "play".into()),
-        file: None,
-        seed: 1,
-        record: None,
-        hashes: None,
-        frames: 120,
-        renderer: RendererChoice::Auto,
-        mute: false,
-    };
-    while let Some(arg) = it.next() {
-        let mut value = |name: &str| it.next().ok_or(format!("{name} needs a value"));
-        match arg.as_str() {
-            "--seed" => a.seed = value("--seed")?.parse().map_err(|_| "bad --seed")?,
-            "--record" => a.record = Some(value("--record")?),
-            "--hashes" => a.hashes = Some(value("--hashes")?),
-            "--frames" => a.frames = value("--frames")?.parse().map_err(|_| "bad --frames")?,
-            "--renderer" => {
-                a.renderer = match value("--renderer")?.as_str() {
-                    "gpu" => RendererChoice::Gpu,
-                    "sdl" => RendererChoice::Sdl,
-                    "auto" => RendererChoice::Auto,
-                    other => return Err(format!("unknown renderer '{other}' (gpu, sdl, auto)")),
-                }
-            }
-            "--mute" => a.mute = true,
-            s if !s.starts_with("--") && a.file.is_none() => a.file = Some(s.to_string()),
-            s => return Err(format!("unknown argument '{s}'")),
-        }
-    }
-    Ok(a)
-}
 
 fn input_map() -> InputMap {
     InputMap::default()
@@ -91,24 +46,6 @@ fn input_map() -> InputMap {
         )
 }
 
-type LoadedAssets = (Vec<(DrawKind, Image)>, Vec<(String, std::rc::Rc<Sound>)>);
-
-/// Loads the committed assets through the asset store: the ball sprite, and
-/// every WAV as a cue named after its file.
-fn load_assets() -> Result<LoadedAssets, String> {
-    let mut store = AssetStore::new(pong::assets::DIR);
-    let mut sounds = vec![];
-    for entry in store.catalog()? {
-        if entry.kind == AssetKind::Sound {
-            let (_, sound) = store.load_sound(&entry.path)?;
-            let cue = entry.path.trim_end_matches(".wav").to_string();
-            sounds.push((cue, sound));
-        }
-    }
-    let (_, ball) = store.load_image("ball.png")?;
-    Ok((vec![(DrawKind::Ball, (*ball).clone())], sounds))
-}
-
 fn summary(p: &Pong) -> String {
     let [l, r] = p.points();
     format!(
@@ -120,26 +57,40 @@ fn summary(p: &Pong) -> String {
     )
 }
 
-fn write(path: &str, text: &str) -> Result<(), String> {
-    std::fs::write(path, text).map_err(|e| format!("{path}: {e}"))
+fn renderer(name: &str) -> Result<RendererChoice, String> {
+    match name {
+        "gpu" => Ok(RendererChoice::Gpu),
+        "sdl" => Ok(RendererChoice::Sdl),
+        "auto" => Ok(RendererChoice::Auto),
+        other => Err(format!("unknown renderer '{other}' (gpu, sdl, auto)")),
+    }
 }
 
-fn run(a: Args) -> Result<(), String> {
+fn run() -> Result<(), String> {
+    let a = Args::from_env(
+        "play",
+        &["--seed", "--record", "--hashes", "--frames", "--renderer"],
+        &["--mute"],
+    )?;
+    let seed: u64 = a.get("--seed", 1)?;
     match a.cmd.as_str() {
         "play" | "smoke" => {
             let smoke = a.cmd == "smoke";
-            let mut sim = Shown::new(Pong::new(PongConfig::new(a.seed))?);
-            let (sprites, sounds) = load_assets()?;
+            let mut sim = Shown::new(Pong::new(PongConfig::new(seed))?);
+            // The committed assets, through the asset store: the ball's
+            // sprite, and every sound as a cue named after its file.
+            let mut store = AssetStore::new(pong::assets::DIR);
+            let (_, ball) = store.load_image("ball.png")?;
             let mut options =
                 WindowOptions::new(format!("{} pong (python)", sage_core::CODENAME), (960, 600));
-            options.max_frames = smoke.then_some(a.frames);
-            options.renderer = a.renderer;
-            options.sprites = sprites;
-            options.sounds = sounds;
-            options.audio = !a.mute;
-            let run = run_windowed(&mut sim, a.seed, &input_map(), &options)?;
-            if let Some(path) = &a.record {
-                write(path, &run.recording.to_text())?;
+            options.max_frames = smoke.then_some(a.get("--frames", 120)?);
+            options.renderer = renderer(a.value("--renderer").unwrap_or("auto"))?;
+            options.sprites = vec![(DrawKind::Ball, (*ball).clone())];
+            options.sounds = store.load_cues()?;
+            options.audio = !a.has("--mute");
+            let run = run_windowed(&mut sim, seed, &input_map(), &options)?;
+            if let Some(path) = a.value("--record") {
+                cli::write_file(path, run.recording.to_text())?;
             }
             println!(
                 "frames={} renderer={} audio={} cues={}/{} {}",
@@ -159,18 +110,16 @@ fn run(a: Args) -> Result<(), String> {
                     DrawKind::Paddle,
                     DrawKind::Ball,
                 ] {
-                    let n = px.iter().find(|(k, _)| *k == kind).map_or(0, |(_, n)| *n);
-                    if n == 0 {
+                    if !px.iter().any(|(k, n)| *k == kind && *n > 0) {
                         return Err(format!("smoke: nothing drawn for {kind:?}"));
                     }
                 }
                 println!("smoke: ok");
             }
-            Ok(())
         }
         "headless" => {
-            let mut pong = Pong::new(PongConfig::new(a.seed))?;
-            let mut rec = InputRecording::new(a.seed);
+            let mut pong = Pong::new(PongConfig::new(seed))?;
+            let mut rec = InputRecording::new(seed);
             while pong.state() != GameState::GameOver {
                 if pong.tick() > 60 * 60 * 10 {
                     return Err(format!("game did not finish: {}", summary(&pong)));
@@ -179,49 +128,31 @@ fn run(a: Args) -> Result<(), String> {
                 rec.record(pong.tick(), input);
                 pong.step(input);
             }
-            if let Some(path) = &a.record {
-                write(path, &rec.to_text())?;
+            if let Some(path) = a.value("--record") {
+                cli::write_file(path, rec.to_text())?;
             }
             println!("{}", summary(&pong));
-            Ok(())
         }
         "replay" => {
-            let path = a.file.ok_or("replay needs a recording file")?;
-            let text = std::fs::read_to_string(&path).map_err(|e| format!("{path}: {e}"))?;
-            let rec = InputRecording::from_text(&text).map_err(|e| e.to_string())?;
-            let mut pong = Pong::new(PongConfig::new(rec.seed))?;
-            let trace = run_recording(&mut pong, &rec);
-            if let Some(out) = &a.hashes {
-                let mut s = format!("initial {:#018x}\n", trace.initial);
-                for (i, h) in trace.hashes.iter().enumerate() {
-                    s.push_str(&format!("{} {h:#018x}\n", i + 1));
-                }
-                write(out, &s)?;
-            }
+            let pong = cli::replay(a.file.as_deref(), a.value("--hashes"), |seed| {
+                Pong::new(PongConfig::new(seed))
+            })?;
             println!("{}", summary(&pong));
-            Ok(())
         }
         "gen-assets" => {
-            std::fs::create_dir_all(pong::assets::DIR).map_err(|e| e.to_string())?;
-            for (name, bytes) in pong::assets::generate()? {
-                let path = format!("{}/{name}", pong::assets::DIR);
-                std::fs::write(&path, &bytes).map_err(|e| format!("{path}: {e}"))?;
-                println!("{name}: {} bytes", bytes.len());
+            for line in generated::write_all(pong::assets::DIR, &pong::assets::generate()?)? {
+                println!("{line}");
             }
-            Ok(())
         }
-        other => Err(format!(
-            "unknown command '{other}' (play, headless, replay, smoke, gen-assets)"
-        )),
+        other => {
+            return Err(format!(
+                "unknown command '{other}' (play, headless, replay, smoke, gen-assets)"
+            ));
+        }
     }
+    Ok(())
 }
 
 fn main() -> ExitCode {
-    match parse().and_then(run) {
-        Ok(()) => ExitCode::SUCCESS,
-        Err(e) => {
-            eprintln!("error: {e}");
-            ExitCode::FAILURE
-        }
-    }
+    cli::exit(run())
 }

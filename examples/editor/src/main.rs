@@ -1,65 +1,58 @@
 //! ```text
 //! editor play   [--project DIR]            open the editor in a window
-//! editor render [--project DIR] [--out FILE.png] [--tab SCENE|CODE|BLOCKS]
+//! editor render [--project DIR] [--out FILE.png] [--tab Scene|Code|Blocks|Timing|Prefabs]
 //!               [--select SID] [--click EXPR]...   draw a screenshot (CPU render)
-//! editor smoke  [--frames N]               open a hidden window, draw, check
+//! editor smoke  [--frames N] [--tab NAME] [--out FILE.png]   open a hidden window, draw, check
 //! ```
 //! `--project DIR` opens every `.py` file in DIR and its `scene.sage`
 //! (without it, a small sample game). Ctrl+S saves; Ctrl+Q quits.
 
-use editor::{Editor, SCREEN, open_dir, sample_project};
-use sage_platform::WindowOptions;
-use sage_platform::ui_window::run_ui_windowed;
+use std::path::PathBuf;
 use std::process::ExitCode;
+use std::time::Instant;
+
+use editor::{CLEAR, Editor, SCREEN, no_prepare, sample_project};
+use sage_app::cli::{self, Args};
+use sage_app::{UiHosted, run_ui_windowed};
+use sage_editor::Project;
+use sage_platform::WindowOptions;
+
+const TABS: [&str; 5] = ["Scene", "Code", "Blocks", "Timing", "Prefabs"];
+
+/// The window's size in pixels: the screen at scale 2.
+const PIXELS: [u32; 2] = [SCREEN[0] as u32 * 2, SCREEN[1] as u32 * 2];
 
 fn main() -> ExitCode {
-    match run() {
-        Ok(()) => ExitCode::SUCCESS,
-        Err(e) => {
-            eprintln!("editor: {e}");
-            ExitCode::FAILURE
-        }
-    }
+    cli::exit(run())
+}
+
+/// Clicks the tab called `name` (in any case).
+fn open_tab(ed: &Editor, name: &str) -> Result<(), String> {
+    let i = TABS
+        .iter()
+        .position(|t| t.eq_ignore_ascii_case(name))
+        .ok_or_else(|| format!("--tab is one of {}", TABS.join(", ")))?;
+    ed.click(&format!("tab_buttons[{i}]"));
+    Ok(())
 }
 
 fn run() -> Result<(), String> {
-    let mut args = std::env::args().skip(1);
-    let cmd = args.next().unwrap_or_else(|| "play".into());
-    let (mut project, mut out, mut tab, mut select, mut frames) =
-        (None, "editor.png".to_string(), None, None, 5u64);
-    let mut clicks = vec![];
-    while let Some(flag) = args.next() {
-        let mut value = |what: &str| args.next().ok_or(format!("{flag} needs {what}"));
-        match flag.as_str() {
-            "--project" => project = Some(std::path::PathBuf::from(value("a directory")?)),
-            "--out" => out = value("a file")?,
-            "--tab" => tab = Some(value("a tab name")?),
-            "--select" => {
-                select = Some(
-                    value("a StableId")?
-                        .parse::<u64>()
-                        .map_err(|e| e.to_string())?,
-                )
-            }
-            "--click" => clicks.push(value("an expression")?),
-            "--frames" => {
-                frames = value("a number")?
-                    .parse()
-                    .map_err(|e: std::num::ParseIntError| e.to_string())?
-            }
-            other => return Err(format!("unknown option {other}")),
-        }
-    }
-    let proj = match &project {
-        Some(d) => open_dir(d)?,
+    let a = Args::from_env(
+        "play",
+        &["--project", "--out", "--tab", "--select", "--click", "--frames"],
+        &[],
+    )?;
+    let dir = a.value("--project").map(PathBuf::from);
+    let project = match &dir {
+        Some(d) => Project::open_dir(d, no_prepare())?,
         None => sample_project()?,
     };
-    let mut ed = Editor::new(proj, project)?;
-    match cmd.as_str() {
+    let mut ed = Editor::new(project, dir)?;
+    let out = a.value("--out").unwrap_or("editor.png");
+    match a.cmd.as_str() {
         "play" => {
-            let options =
-                WindowOptions::new("Editor", (SCREEN[0] as u32 * 2, SCREEN[1] as u32 * 2));
-            let started = std::time::Instant::now();
+            let options = WindowOptions::new("Editor", (PIXELS[0], PIXELS[1]));
+            let started = Instant::now();
             let run = run_ui_windowed(&mut ed, &options)?;
             let secs = started.elapsed().as_secs_f64().max(1e-9);
             println!(
@@ -69,25 +62,17 @@ fn run() -> Result<(), String> {
                 run.frames as f64 / secs,
                 run.ticks as f64 / secs
             );
-            Ok(())
         }
         "smoke" => {
             // A real (hidden) GPU window: draw the editor, read the frame back
             // and check what a person would see is on it.
-            if let Some(t) = &tab {
-                let i = ["SCENE", "CODE", "BLOCKS", "TIMING", "PREFABS"]
-                    .iter()
-                    .position(|n| n.eq_ignore_ascii_case(t))
-                    .ok_or("tab is SCENE, CODE, BLOCKS, TIMING or PREFABS")?;
-                ed.click(&format!("tab_buttons[{i}]"));
+            if let Some(tab) = a.value("--tab") {
+                open_tab(&ed, tab)?;
             }
-            let mut options = WindowOptions::new(
-                "Editor (smoke)",
-                (SCREEN[0] as u32 * 2, SCREEN[1] as u32 * 2),
-            );
+            let mut options = WindowOptions::new("Editor (smoke)", (PIXELS[0], PIXELS[1]));
             options.hidden = true;
-            options.max_frames = Some(frames);
-            let started = std::time::Instant::now();
+            options.max_frames = Some(a.get("--frames", 5)?);
+            let started = Instant::now();
             let run = run_ui_windowed(&mut ed, &options)?;
             let secs = started.elapsed().as_secs_f64().max(1e-9);
             println!(
@@ -96,53 +81,36 @@ fn run() -> Result<(), String> {
                 run.frames
             );
             let image = run.last_frame.ok_or("no frame was read back")?;
-            let (mut orange, mut dark, mut yellow, mut other) = (0usize, 0usize, 0usize, 0usize);
-            for y in 0..image.height {
-                for x in 0..image.width {
-                    let p = image.pixel(x, y);
-                    if p[0] > 200 && (100..180).contains(&p[1]) && p[2] < 80 {
-                        orange += 1;
-                    } else if p[0] > 220 && p[1] > 200 && p[2] < 160 {
-                        yellow += 1;
-                    } else if p[..3] == [15, 13, 11] {
-                        dark += 1;
-                    } else {
-                        other += 1;
-                    }
-                }
-            }
-            std::fs::write(&out, image.to_png_bytes()?).map_err(|e| e.to_string())?;
+            let count = |f: &dyn Fn(&[u8]) -> bool| image.rgba.chunks(4).filter(|p| f(p)).count();
+            let orange = count(&|p| p[0] > 200 && (100..180).contains(&p[1]) && p[2] < 80);
+            let yellow = count(&|p| p[0] > 220 && p[1] > 200 && p[2] < 160);
+            let dark = count(&|p| p[..3] == CLEAR[..3]);
+            cli::write_file(out, image.to_png_bytes()?)?;
             println!(
-                "{} frames, {} ticks, {}x{}: {orange} orange, {yellow} sticky-note yellow, {dark} background, {other} other; wrote {out}",
+                "{} frames, {} ticks, {}x{}: {orange} orange, {yellow} sticky-note yellow, {dark} background; wrote {out}",
                 run.frames, run.ticks, image.width, image.height
             );
             if orange == 0 || dark == 0 {
                 return Err("the editor's colors are not on the frame".into());
             }
-            Ok(())
         }
         "render" => {
-            if let Some(s) = select {
-                ed.project(|p| p.doc.select(Some(s)));
+            if let Some(sid) = a.value("--select") {
+                let sid: u64 = sid.parse().map_err(|_| format!("bad --select '{sid}'"))?;
+                ed.project(|p| p.doc.select(Some(sid)));
             }
             ed.idle(2);
-            if let Some(t) = tab {
-                let i = ["SCENE", "CODE", "BLOCKS"]
-                    .iter()
-                    .position(|n| n.eq_ignore_ascii_case(&t))
-                    .ok_or("tab is SCENE, CODE or BLOCKS")?;
-                ed.click(&format!("tab_buttons[{i}]"));
+            if let Some(tab) = a.value("--tab") {
+                open_tab(&ed, tab)?;
             }
-            for c in &clicks {
-                ed.click(c);
+            for expr in a.values("--click") {
+                ed.click(expr);
             }
-            ed.idle(3);
-            let size = [SCREEN[0] as u32 * 2, SCREEN[1] as u32 * 2];
-            let img = ed.render(size);
-            std::fs::write(&out, img.to_png_bytes()?).map_err(|e| e.to_string())?;
+            ed.idle(8);
+            cli::write_file(out, ed.render(PIXELS).to_png_bytes()?)?;
             println!("wrote {out}");
-            Ok(())
         }
-        other => Err(format!("unknown command {other}")),
+        other => return Err(format!("unknown command {other}")),
     }
+    Ok(())
 }

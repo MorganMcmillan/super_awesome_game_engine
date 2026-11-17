@@ -8,4 +8,6 @@ publish.workspace = true
 
 [dependencies]
 sage_core.workspace = true
+sage_ecs_py.workspace = true
+flecs_ecs.workspace = true
 parry2d.workspace = true

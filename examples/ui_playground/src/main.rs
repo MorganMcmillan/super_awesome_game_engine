@@ -17,79 +17,38 @@
 
 use std::process::ExitCode;
 
+use sage_app::cli::{self, Args};
+use sage_app::{UiHosted, run_ui_windowed};
+use sage_core::input::InputRecording;
 use sage_platform::WindowOptions;
-use sage_platform::ui_window::run_ui_windowed;
 use ui_playground::{CLEAR, Playground, SCREEN};
 
-struct Args {
-    cmd: String,
-    out: String,
-    scale: u32,
-    accent: Option<String>,
-    dialog: bool,
-    page: Option<String>,
-    frames: u64,
-    record: Option<String>,
-    file: Option<String>,
-    /// Python expressions for entities to click before the picture (`render`).
-    clicks: Vec<String>,
-    /// A TrueType file to draw text with instead of the built-in face.
-    font: Option<String>,
-    proportional: bool,
-    pick_file: bool,
+fn pixels(scale: u32) -> [u32; 2] {
+    [SCREEN[0] as u32 * scale, SCREEN[1] as u32 * scale]
 }
 
-fn parse() -> Result<Args, String> {
-    let mut it = std::env::args().skip(1);
-    let mut a = Args {
-        cmd: it.next().unwrap_or_else(|| "play".into()),
-        out: "ui-playground.png".into(),
-        scale: 2,
-        accent: None,
-        dialog: false,
-        page: None,
-        frames: 5,
-        record: None,
-        file: None,
-        clicks: vec![],
-        font: None,
-        proportional: false,
-        pick_file: false,
-    };
-    while let Some(flag) = it.next() {
-        let mut value = |what: &str| it.next().ok_or(format!("{flag} needs {what}"));
-        match flag.as_str() {
-            "--out" => a.out = value("a file")?,
-            "--scale" => a.scale = value("a number")?.parse().map_err(|_| "bad --scale")?,
-            "--accent" => a.accent = Some(value("a name")?.to_uppercase()),
-            "--frames" => a.frames = value("a number")?.parse().map_err(|_| "bad --frames")?,
-            "--dialog" => a.dialog = true,
-            "--record" => a.record = Some(value("a file")?),
-            "--click" => a.clicks.push(value("an expression")?),
-            "--proportional" => a.proportional = true,
-            "--pick-file" => a.pick_file = true,
-            "--font" => a.font = Some(value("a .ttf file")?),
-            "--page" => a.page = Some(value("a name")?.to_uppercase()),
-            other if !other.starts_with("--") && a.file.is_none() => a.file = Some(other.into()),
-            other => return Err(format!("unknown flag {other}")),
-        }
-    }
-    if a.scale == 0 {
-        return Err("--scale must be at least 1".into());
-    }
-    Ok(a)
-}
-
-fn pixels(scale: u32) -> (u32, u32) {
-    (SCREEN[0] as u32 * scale, SCREEN[1] as u32 * scale)
+fn window(title: &str, scale: u32) -> WindowOptions {
+    let [w, h] = pixels(scale);
+    WindowOptions::new(title, (w, h))
 }
 
 fn run() -> Result<(), String> {
-    let a = parse()?;
+    let a = Args::from_env(
+        "play",
+        &[
+            "--out", "--scale", "--accent", "--frames", "--record", "--click", "--font", "--page",
+        ],
+        &["--dialog", "--proportional", "--pick-file"],
+    )?;
+    let scale: u32 = a.get("--scale", 2)?;
+    if scale == 0 {
+        return Err("--scale must be at least 1".into());
+    }
+    let page = a.value("--page").map(str::to_uppercase);
     let mut playground = Playground::new()?;
-    if let Some(path) = &a.font {
+    if let Some(path) = a.value("--font") {
         let bytes = std::fs::read(path).map_err(|e| format!("{path}: {e}"))?;
-        if a.proportional {
+        if a.has("--proportional") {
             playground.set_face_proportional(bytes)?;
         } else {
             playground.set_face(bytes)?;
@@ -97,30 +56,29 @@ fn run() -> Result<(), String> {
     }
     match a.cmd.as_str() {
         "play" => {
-            let options = WindowOptions::new("UI Playground", pixels(a.scale));
-            if a.record.is_some() {
+            if a.value("--record").is_some() {
                 playground.start_recording(1);
             }
-            if a.pick_file {
+            if a.has("--pick-file") {
                 // Ask for the system file dialog as soon as the window is up.
                 playground.show_page("PICKERS");
                 playground.click("native_pick");
             }
-            let run = run_ui_windowed(&mut playground, &options)?;
+            let run = run_ui_windowed(&mut playground, &window("UI Playground", scale))?;
             println!("{} frames, {} ticks", run.frames, run.ticks);
-            if a.pick_file {
+            if a.has("--pick-file") {
                 println!(
                     "file chosen: {:?}",
                     playground.eval::<String>("ui.file_value(native_pick)")
                 );
             }
-            if let (Some(path), Some(rec)) = (&a.record, playground.take_recording()) {
-                std::fs::write(path, rec.to_text()).map_err(|e| format!("{path}: {e}"))?;
+            if let (Some(path), Some(rec)) = (a.value("--record"), playground.take_recording()) {
+                cli::write_file(path, rec.to_text())?;
                 println!("recorded {} ticks to {path}", rec.len);
             }
         }
         "access" => {
-            if let Some(page) = &a.page {
+            if let Some(page) = &page {
                 playground.show_page(page);
             }
             playground.idle(3);
@@ -128,71 +86,57 @@ fn run() -> Result<(), String> {
         }
         "replay" => {
             let path = a.file.as_deref().ok_or("replay needs a recording file")?;
-            let text = std::fs::read_to_string(path).map_err(|e| format!("{path}: {e}"))?;
             let rec =
-                sage_core::input::InputRecording::from_text(&text).map_err(|e| e.to_string())?;
+                InputRecording::from_text(&cli::read_text(path)?).map_err(|e| e.to_string())?;
             let hashes = playground.replay(&rec);
             println!(
                 "replayed {} ticks, final state hash {:016x}",
                 hashes.len(),
                 hashes.last().copied().unwrap_or(0)
             );
-            if a.out != "ui-playground.png" || a.scale != 2 {
-                let image =
-                    playground.render([SCREEN[0] as u32 * a.scale, SCREEN[1] as u32 * a.scale]);
-                std::fs::write(&a.out, image.to_png_bytes()?).map_err(|e| e.to_string())?;
+            // A picture of where the session ended, when one was asked for.
+            if a.value("--out").is_some() || a.value("--scale").is_some() {
+                let out = a.value("--out").unwrap_or("ui-playground.png");
+                cli::write_file(out, playground.render(pixels(scale)).to_png_bytes()?)?;
             }
         }
         "render" => {
-            if let Some(name) = &a.accent {
+            if let Some(name) = a.value("--accent").map(str::to_uppercase) {
                 playground.run(&format!("T.apply(T.accents[{name:?}])"));
             }
-            if let Some(page) = &a.page {
+            if let Some(page) = &page {
                 playground.show_page(page);
             }
             playground.idle(40);
-            for expr in &a.clicks {
+            for expr in a.values("--click") {
                 playground.click(expr);
                 playground.idle(2);
             }
             playground.hover(playground.center("primary"));
-            if a.dialog {
+            if a.has("--dialog") {
                 playground.click("dialog_button");
                 playground.idle(2);
             }
-            let (w, h) = pixels(a.scale);
-            let png = playground.render([w, h]).to_png_bytes()?;
-            std::fs::write(&a.out, png).map_err(|e| format!("{}: {e}", a.out))?;
-            println!("wrote {} ({w}x{h})", a.out);
+            let out = a.value("--out").unwrap_or("ui-playground.png");
+            let [w, h] = pixels(scale);
+            cli::write_file(out, playground.render([w, h]).to_png_bytes()?)?;
+            println!("wrote {out} ({w}x{h})");
         }
         "smoke" => {
-            if let Some(page) = &a.page {
+            if let Some(page) = &page {
                 playground.show_page(page);
             }
-            let mut options = WindowOptions::new("UI Playground (smoke)", pixels(2));
+            let mut options = window("UI Playground (smoke)", 2);
             options.hidden = true;
-            options.max_frames = Some(a.frames);
+            options.max_frames = Some(a.get("--frames", 5)?);
             let run = run_ui_windowed(&mut playground, &options)?;
             let image = run.last_frame.ok_or("no frame was read back")?;
             // The app background is the clear color's neighbour, the title is
             // drawn in the primary orange: both must be on screen.
-            let mut orange = 0usize;
-            let mut dark = 0usize;
-            let mut magenta = 0usize;
-            for y in 0..image.height {
-                for x in 0..image.width {
-                    let p = image.pixel(x, y);
-                    if p[0] > 200 && (100..180).contains(&p[1]) && p[2] < 80 {
-                        orange += 1;
-                    }
-                    if p[..3] == CLEAR[..3] {
-                        dark += 1;
-                    }
-                    if p[0] > 240 && p[1] < 10 && p[2] > 240 {
-                        magenta += 1;
-                    }
-                }
-            }
+            let count = |f: &dyn Fn(&[u8]) -> bool| image.rgba.chunks(4).filter(|p| f(p)).count();
+            let orange = count(&|p| p[0] > 200 && (100..180).contains(&p[1]) && p[2] < 80);
+            let dark = count(&|p| p[..3] == CLEAR[..3]);
+            let magenta = count(&|p| p[0] > 240 && p[1] < 10 && p[2] > 240);
             println!(
                 "{} frames, {} ticks, {}x{}: {orange} orange pixels, {dark} background pixels",
                 run.frames, run.ticks, image.width, image.height
@@ -216,11 +160,5 @@ fn run() -> Result<(), String> {
 }
 
 fn main() -> ExitCode {
-    match run() {
-        Ok(()) => ExitCode::SUCCESS,
-        Err(e) => {
-            eprintln!("error: {e}");
-            ExitCode::FAILURE
-        }
-    }
+    cli::exit(run())
 }

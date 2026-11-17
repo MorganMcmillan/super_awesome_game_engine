@@ -208,6 +208,72 @@ fn viewport(out: &mut Vec<UiDraw>, n: &Node, v: &ViewportNode, fade: f32) {
     }
 }
 
+/// The width of one strip of a gradient, in UI units.
+const GRADIENT_STRIP: f32 = 8.0;
+
+fn srgb_to_linear(c: u8) -> f32 {
+    let c = c as f32 / 255.0;
+    if c <= 0.04045 {
+        c / 12.92
+    } else {
+        ((c + 0.055) / 1.055).powf(2.4)
+    }
+}
+
+fn linear_to_srgb(c: f32) -> u8 {
+    let c = c.clamp(0.0, 1.0);
+    let v = if c <= 0.003_130_8 {
+        c * 12.92
+    } else {
+        1.055 * c.powf(1.0 / 2.4) - 0.055
+    };
+    (v * 255.0).round() as u8
+}
+
+/// sRGB bytes to OKLAB (Björn Ottosson's matrices).
+fn to_oklab(c: [u8; 4]) -> [f32; 3] {
+    let (r, g, b) = (
+        srgb_to_linear(c[0]),
+        srgb_to_linear(c[1]),
+        srgb_to_linear(c[2]),
+    );
+    let l = (0.412_221_47 * r + 0.536_332_55 * g + 0.051_445_995 * b).cbrt();
+    let m = (0.211_903_5 * r + 0.680_699_5 * g + 0.107_396_96 * b).cbrt();
+    let s = (0.088_302_46 * r + 0.281_718_85 * g + 0.629_978_7 * b).cbrt();
+    [
+        0.210_454_26 * l + 0.793_617_8 * m - 0.004_072_047 * s,
+        1.977_998_5 * l - 2.428_592_2 * m + 0.450_593_7 * s,
+        0.025_904_037 * l + 0.782_771_77 * m - 0.808_675_77 * s,
+    ]
+}
+
+fn from_oklab(lab: [f32; 3], alpha: u8) -> [u8; 4] {
+    let l = lab[0] + 0.396_337_78 * lab[1] + 0.215_803_76 * lab[2];
+    let m = lab[0] - 0.105_561_346 * lab[1] - 0.063_854_17 * lab[2];
+    let s = lab[0] - 0.089_484_18 * lab[1] - 1.291_485_5 * lab[2];
+    let (l, m, s) = (l * l * l, m * m * m, s * s * s);
+    [
+        linear_to_srgb(4.076_741_7 * l - 3.307_711_6 * m + 0.230_969_94 * s),
+        linear_to_srgb(-1.268_438 * l + 2.609_757_4 * m - 0.341_319_4 * s),
+        linear_to_srgb(-0.004_196_086_3 * l - 0.703_418_6 * m + 1.707_614_7 * s),
+        alpha,
+    ]
+}
+
+/// `a` to `b` at `t`, mixed in OKLAB (alpha linearly). The ends are exact.
+fn oklab_mix(a: [u8; 4], b: [u8; 4], t: f32) -> [u8; 4] {
+    if t <= 0.0 {
+        return a;
+    }
+    if t >= 1.0 {
+        return b;
+    }
+    let (la, lb) = (to_oklab(a), to_oklab(b));
+    let lab = std::array::from_fn(|i| la[i] + (lb[i] - la[i]) * t);
+    let alpha = (a[3] as f32 + (b[3] as f32 - a[3] as f32) * t).round() as u8;
+    from_oklab(lab, alpha)
+}
+
 fn outline(out: &mut Vec<UiDraw>, r: Rect, t: f32, color: [u8; 4], clip: Option<Rect>) {
     let edge = |x, y, w, h| Rect { x, y, w, h };
     rect(out, edge(r.x, r.y, r.w, t), color, clip);
@@ -373,6 +439,15 @@ fn node(out: &mut Vec<UiDraw>, n: &Node, fade: f32) {
     let border = c4(col.border);
     let clip = n.clip;
     let rounded = n.radius > 0.0 && n.gradient.is_none();
+    let accent = if n.enabled {
+        rgba(n.accent)
+    } else {
+        faded(rgba(n.accent), 0.5)
+    };
+    let accent = faded(accent, fade);
+    // A focused rounded node rings itself with rounded layers; a square one
+    // (or one with no fill to cover the ring's inside) gets the outline.
+    let round_ring = rounded && n.focused && n.enabled && fill[3] > 0;
     // Shadow first, under everything.
     if let Some(sh) = n.shadow {
         out.push(UiDraw::Shadow {
@@ -388,44 +463,60 @@ fn node(out: &mut Vec<UiDraw>, n: &Node, fade: f32) {
     // rectangle with the fill's rounded rectangle inset inside it.
     if let Some(g) = n.gradient {
         let to = c4(g.to);
-        let colors = if g.vertical {
-            [fill, fill, to, to]
-        } else {
-            [fill, to, to, fill]
-        };
         if fill[3] > 0 || to[3] > 0 {
-            out.push(UiDraw::Gradient {
-                pos: [r.x, r.y],
-                size: [r.w, r.h],
-                colors,
-                clip: clip4(clip),
-            });
-        }
-    } else if rounded {
-        let bw = n.border_width.min(r.w / 2.0).min(r.h / 2.0);
-        if bw > 0.0 && border[3] > 0 {
-            out.push(UiDraw::Round {
-                pos: [r.x, r.y],
-                size: [r.w, r.h],
-                radius: n.radius,
-                color: border,
-                clip: clip4(clip),
-            });
-            if fill[3] > 0 {
-                out.push(UiDraw::Round {
-                    pos: [r.x + bw, r.y + bw],
-                    size: [r.w - 2.0 * bw, r.h - 2.0 * bw],
-                    radius: (n.radius - bw).max(0.0),
-                    color: fill,
+            // Presentation blends linearly between corners, which muddies the
+            // middle of a gradient; so the gradient is cut into strips whose
+            // end colors are mixed in OKLAB, and each strip blends linearly.
+            let extent = if g.vertical { r.h } else { r.w };
+            let steps = if fill == to {
+                1
+            } else {
+                (extent / GRADIENT_STRIP).ceil().clamp(1.0, 32.0) as usize
+            };
+            for k in 0..steps {
+                let (t0, t1) = (k as f32 / steps as f32, (k + 1) as f32 / steps as f32);
+                let (a, b) = (oklab_mix(fill, to, t0), oklab_mix(fill, to, t1));
+                let (pos, size, colors) = if g.vertical {
+                    ([r.x, r.y + r.h * t0], [r.w, r.h * (t1 - t0)], [a, a, b, b])
+                } else {
+                    ([r.x + r.w * t0, r.y], [r.w * (t1 - t0), r.h], [a, b, b, a])
+                };
+                out.push(UiDraw::Gradient {
+                    pos,
+                    size,
+                    colors,
                     clip: clip4(clip),
                 });
             }
-        } else if fill[3] > 0 {
+        }
+    } else if rounded {
+        // Layers, outermost first: the focus ring (1 unit), the border, the
+        // fill. Each is a rounded rectangle inset by what lies outside it.
+        let rw = if round_ring { 1.0 } else { 0.0 };
+        let bw = if border[3] > 0 {
+            n.border_width.min(r.w / 2.0).min(r.h / 2.0)
+        } else {
+            0.0
+        };
+        let mut layers = vec![];
+        if round_ring {
+            layers.push((0.0, accent));
+        }
+        if bw > rw {
+            layers.push((rw, border));
+        }
+        if fill[3] > 0 || !layers.is_empty() {
+            layers.push((bw.max(rw), fill));
+        }
+        for (inset, color) in layers {
+            if color[3] == 0 {
+                continue;
+            }
             out.push(UiDraw::Round {
-                pos: [r.x, r.y],
-                size: [r.w, r.h],
-                radius: n.radius,
-                color: fill,
+                pos: [r.x + inset, r.y + inset],
+                size: [r.w - 2.0 * inset, r.h - 2.0 * inset],
+                radius: (n.radius - inset).max(0.0),
+                color,
                 clip: clip4(clip),
             });
         }
@@ -442,12 +533,6 @@ fn node(out: &mut Vec<UiDraw>, n: &Node, fade: f32) {
             clip: clip4(clip),
         });
     }
-    let accent = if n.enabled {
-        rgba(n.accent)
-    } else {
-        faded(rgba(n.accent), 0.5)
-    };
-    let accent = faded(accent, fade);
     match n.widget {
         Widget::Slider | Widget::Meter if n.max != n.min => {
             let t = ((n.value - n.min) / (n.max - n.min)).clamp(0.0, 1.0);
@@ -515,7 +600,7 @@ fn node(out: &mut Vec<UiDraw>, n: &Node, fade: f32) {
     if n.border_width > 0.0 && !(rounded && border[3] > 0) {
         outline(out, r, n.border_width, border, clip);
     }
-    if n.focused && n.enabled {
+    if n.focused && n.enabled && !round_ring {
         outline(out, r, 1.0, accent, clip);
     }
     // A text input shows its text inside its own box, never outside it.
@@ -527,8 +612,10 @@ fn node(out: &mut Vec<UiDraw>, n: &Node, fade: f32) {
     if n.widget == Widget::TextInput {
         text_field(out, n, c4(col.text), c4(n.accent), text_clip);
     } else if n.rich.is_some() {
+        selection_tint(out, n, accent, text_clip);
         rich_text(out, n, &c4, text_clip);
     } else if !n.lines.is_empty() {
+        selection_tint(out, n, accent, text_clip);
         let color = c4(col.text);
         let visible = text_clip.is_none_or(|c| c.w > 0.0 && c.h > 0.0);
         if visible {
@@ -540,6 +627,34 @@ fn node(out: &mut Vec<UiDraw>, n: &Node, fade: f32) {
                 color,
                 clip: clip4(text_clip),
             });
+        }
+    }
+}
+
+/// The tint behind the selected text of a selectable node.
+fn selection_tint(out: &mut Vec<UiDraw>, n: &Node, accent: [u8; 4], clip: Option<Rect>) {
+    if !n.selectable || n.field.anchor == n.caret {
+        return;
+    }
+    let len = n.text.chars().count();
+    let (a, c) = (n.field.anchor.min(len), n.caret.min(len));
+    let (lo, hi) = (a.min(c), a.max(c));
+    let s = n.text_scale;
+    let (adv, lh) = (UI_ADVANCE * s, UI_LINE_HEIGHT * s);
+    let (x0, y0) = (n.rect.x + n.padding[0], n.rect.y + n.padding[1]);
+    let cols = chars_per_line(n.rect.w - n.padding[0] - n.padding[2], s);
+    let mut tint = accent;
+    tint[3] = 0x66;
+    for (row, rw) in rows(&n.text, cols, n.wrap).iter().enumerate() {
+        let (from, to) = (lo.max(rw.start), hi.min(rw.end));
+        if from < to {
+            let r = Rect {
+                x: x0 + (from - rw.start) as f32 * adv,
+                y: y0 + row as f32 * lh,
+                w: (to - from) as f32 * adv,
+                h: lh,
+            };
+            rect(out, r, tint, clip);
         }
     }
 }
@@ -1207,6 +1322,48 @@ mod tests {
     }
 
     #[test]
+    fn oklab_mixes_are_perceptual_not_naive() {
+        let (black, white) = ([0, 0, 0, 255], [255, 255, 255, 255]);
+        // Half way in lightness is about 99, not the naive 128.
+        let mid = oklab_mix(black, white, 0.5);
+        assert!(
+            (97..=101).contains(&mid[0]) && mid[0] == mid[1] && mid[1] == mid[2],
+            "{mid:?}"
+        );
+        assert_eq!(oklab_mix(black, white, 0.0), black);
+        assert_eq!(oklab_mix(black, white, 1.0), white);
+        // Colors round trip, and alpha blends linearly.
+        let c = [200, 30, 90, 255];
+        assert_eq!(from_oklab(to_oklab(c), 255), c);
+        assert_eq!(oklab_mix([9, 9, 9, 0], [9, 9, 9, 100], 0.5)[3], 50);
+    }
+
+    #[test]
+    fn a_focused_rounded_node_has_a_rounded_ring_not_a_square_one() {
+        let d = one(
+            Node {
+                width: Size::Fixed(40.0),
+                height: Size::Fixed(20.0),
+                fill: 0x1020_30ff,
+                accent: 0x00ff_00ff,
+                radius: 4.0,
+                focused: true,
+                ..Node::default()
+            },
+            100.0,
+            100.0,
+        );
+        // Accent Round, then the fill inset by the ring: no square Rect.
+        assert_eq!(d.len(), 2, "{d:?}");
+        assert!(matches!(&d[0], UiDraw::Round { size, radius, color, .. }
+            if *size == [40.0, 20.0] && *radius == 4.0 && *color == [0, 255, 0, 255]));
+        assert!(
+            matches!(&d[1], UiDraw::Round { pos, size, radius, color, .. }
+            if *pos == [1.0, 1.0] && *size == [38.0, 18.0] && *radius == 3.0 && *color == [0x10, 0x20, 0x30, 255])
+        );
+    }
+
+    #[test]
     fn rounded_fills_borders_shadows_gradients_and_slices_are_their_own_commands() {
         let base = Node {
             width: Size::Fixed(40.0),
@@ -1283,15 +1440,25 @@ mod tests {
         );
         let top = [0x10, 0x20, 0x30, 0xff];
         let bottom = [255, 0, 0, 255];
-        assert_eq!(
-            d,
-            vec![UiDraw::Gradient {
-                pos: [0.0, 0.0],
-                size: [40.0, 20.0],
-                colors: [top, top, bottom, bottom],
-                clip: None
-            }]
-        );
+        // Strips from top to bottom, each blending linearly between OKLAB
+        // mixes, so the ends are exact and the strips meet.
+        type Strip = ([f32; 2], [f32; 2], [[u8; 4]; 4]);
+        let strips: Vec<Strip> = d
+            .iter()
+            .map(|c| match c {
+                UiDraw::Gradient {
+                    pos, size, colors, ..
+                } => (*pos, *size, *colors),
+                other => panic!("{other:?}"),
+            })
+            .collect();
+        assert!(strips.len() > 1);
+        assert_eq!(strips[0].2[0], top);
+        assert_eq!(strips.last().unwrap().2[3], bottom);
+        for w in strips.windows(2) {
+            assert_eq!(w[0].2[3], w[1].2[0], "strips share an edge color");
+            assert!((w[0].0[1] + w[0].1[1] - w[1].0[1]).abs() < 1e-3);
+        }
         // A 9-slice background is drawn over the fill.
         let d = one(
             Node {

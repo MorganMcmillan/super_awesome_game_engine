@@ -1,9 +1,13 @@
-//! A transaction log over scenes (design doc 10.7 item 4).
+//! One transaction log for everything a person edits (design doc 10.7 item
+//! 4): the scene and the scripts share a single undo stack, so Undo takes
+//! back whatever was done last (decided by Morgan, 2026-11-16).
 //!
-//! An edit is the difference between two scenes: the entities that changed,
-//! each with its value before and after. Undo applies a transaction
-//! backwards, redo forwards. Nothing here knows about Flecs; the document
-//! applies the result to a live world.
+//! A scene edit is the difference between two scenes: the entities that
+//! changed, each with its value before and after. A script edit is the
+//! script's text before and after. Undo applies a transaction backwards,
+//! redo forwards. Nothing here knows about Flecs or Python: the scene is
+//! changed in place, and the script texts to put back are handed to the
+//! caller, which owns the scripts.
 
 use sage_scene::{Scene, SceneComponent, SceneEntity};
 
@@ -82,7 +86,7 @@ impl SceneDiff {
     }
 
     /// Applies the change to `scene` (forwards), or undoes it (`forward` is
-    /// false). Also brings in the schemas the scene lacks, from `schemas`.
+    /// false).
     pub fn apply(&self, scene: &mut Scene, forward: bool) {
         for c in &self.entities {
             let (from, to) = if forward {
@@ -125,11 +129,31 @@ impl SceneDiff {
     }
 }
 
+/// One script's text before and after an edit.
+#[derive(Clone, Debug, PartialEq)]
+pub struct SourceChange {
+    pub name: String,
+    pub before: String,
+    pub after: String,
+}
+
+/// What an undo or redo did, for the caller to finish and to tell the person.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct Step {
+    pub label: String,
+    /// The scene was changed (already applied).
+    pub scene: bool,
+    /// Scripts to give this text: `(name, text)`. Applying them is the
+    /// caller's part.
+    pub sources: Vec<(String, String)>,
+}
+
 /// One undoable step.
 #[derive(Clone, Debug, PartialEq)]
 pub struct Transaction {
     pub label: String,
     pub diff: SceneDiff,
+    pub sources: Vec<SourceChange>,
     /// Edits with the same key merge while they follow each other, so a drag
     /// or typing into one field is a single step.
     pub key: Option<String>,
@@ -169,15 +193,50 @@ impl History {
             }
             return;
         }
-        self.sealed = false;
-        self.done.push(Transaction {
+        self.push(Transaction {
             label: label.to_string(),
             diff,
+            sources: vec![],
             key,
         });
+    }
+
+    /// Records a change to a script's text. Redo is cleared.
+    pub fn record_source(&mut self, label: &str, change: SourceChange) {
+        if change.before == change.after {
+            return;
+        }
+        self.undone.clear();
+        self.push(Transaction {
+            label: label.to_string(),
+            diff: SceneDiff::default(),
+            sources: vec![change],
+            key: None,
+        });
+    }
+
+    fn push(&mut self, t: Transaction) {
+        self.sealed = false;
+        self.done.push(t);
         if self.done.len() > self.limit.max(1) {
             self.done.remove(0);
         }
+    }
+
+    /// Forgets the scene half of every step (a step that was only a scene
+    /// edit goes). Called when the components' fields changed under the
+    /// scene: an older scene difference describes entities in a shape that
+    /// no longer exists, so it cannot be applied. Returns how many steps
+    /// went.
+    pub fn drop_scene_steps(&mut self) -> usize {
+        let before = self.done.len() + self.undone.len();
+        for stack in [&mut self.done, &mut self.undone] {
+            for t in stack.iter_mut() {
+                t.diff = SceneDiff::default();
+            }
+            stack.retain(|t| !t.sources.is_empty());
+        }
+        before - self.done.len() - self.undone.len()
     }
 
     /// Ends merging: the next edit starts a new step even with the same key
@@ -186,22 +245,32 @@ impl History {
         self.sealed = true;
     }
 
-    pub fn undo(&mut self, scene: &mut Scene) -> Option<String> {
+    /// Takes back the last step: the scene is changed here, the scripts'
+    /// texts are returned for the caller to apply.
+    pub fn undo(&mut self, scene: &mut Scene) -> Option<Step> {
         let t = self.done.pop()?;
-        t.diff.apply(scene, false);
-        let label = t.label.clone();
+        let step = Self::apply(&t, scene, false);
         self.undone.push(t);
         self.sealed = true;
-        Some(label)
+        Some(step)
     }
 
-    pub fn redo(&mut self, scene: &mut Scene) -> Option<String> {
+    pub fn redo(&mut self, scene: &mut Scene) -> Option<Step> {
         let t = self.undone.pop()?;
-        t.diff.apply(scene, true);
-        let label = t.label.clone();
+        let step = Self::apply(&t, scene, true);
         self.done.push(t);
         self.sealed = true;
-        Some(label)
+        Some(step)
+    }
+
+    fn apply(t: &Transaction, scene: &mut Scene, forward: bool) -> Step {
+        t.diff.apply(scene, forward);
+        let text = |c: &SourceChange| if forward { &c.after } else { &c.before }.clone();
+        Step {
+            label: t.label.clone(),
+            scene: !t.diff.is_empty(),
+            sources: t.sources.iter().map(|c| (c.name.clone(), text(c))).collect(),
+        }
     }
 
     pub fn can_undo(&self) -> bool {

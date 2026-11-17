@@ -150,6 +150,7 @@ class Theme:
         ui.SortRow.set(Paint(BG2, EDGE, 1.0, accent))
         ui.SortRow.set(TextStyle(TEXT, 1.0, 0))
         ui.ResizeGrip.set(Paint(accent, 0, 0.0, accent))
+        ui.DropBar.set(Paint(accent, 0, 0.0, accent))
         ui.TabButton.set(Paint(BG2, EDGE, 1.0, accent))
         ui.TabButton.set(TextStyle(MUTED, 1.0, 0))
         ui.TabButton.set(States(checked_fill=accent, checked_text=INK, hover_text=TEXT))

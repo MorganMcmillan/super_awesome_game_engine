@@ -134,6 +134,21 @@ impl AssetStore {
         Ok((id, snd))
     }
 
+    /// Every sound under the root as a cue: named after its path without the
+    /// extension (`jump.wav` is the cue `jump`), in path order. What a window
+    /// loop registers so a simulation's cue names find their sounds.
+    pub fn load_cues(&mut self) -> Result<Vec<(String, Rc<Sound>)>, String> {
+        let mut cues = vec![];
+        for entry in self.catalog()? {
+            if entry.kind == AssetKind::Sound {
+                let (_, sound) = self.load_sound(&entry.path)?;
+                let name = entry.path.rsplit_once('.').map_or(&*entry.path, |(n, _)| n);
+                cues.push((name.to_string(), sound));
+            }
+        }
+        Ok(cues)
+    }
+
     /// Re-reads every cached asset and returns the ids whose content changed.
     /// Unchanged files are not decoded again.
     pub fn reload(&mut self, catalog: &[CatalogEntry]) -> Result<Vec<AssetId>, String> {

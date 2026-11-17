@@ -969,6 +969,69 @@ class Blocks:
 
         return self._apply({id(sholder): sedit, id(dholder): put})
 
+    def move_tail(self, block_id, parent_id, field, index):
+        """Scratch's drag: takes a statement and every statement below it in
+        its body, and puts the whole chain into `field` of another function
+        or statement at position `index`. Notes and formatting travel with
+        each node. Refuses a drop into the chain itself, a chain that holds
+        an elif, or a result with a block after a terminal one."""
+        block, parent, pfield = self.find(block_id)
+        if block["k"] not in STATEMENTS or parent is None:
+            raise ValueError("only statements move")
+        src = parent[pfield]
+        i = src.index(block)
+        chain = src[i:]
+        if any(b.get("elif") for b in chain):
+            raise ValueError("an elif moves with its if")
+        for b in chain:
+            if _contains(b, parent_id):
+                raise ValueError("a block cannot move into itself")
+        dest, _, _ = self.find(parent_id)
+        dholder, doff = self._holder(dest, field)
+        sholder, soff = self._holder(parent, pfield)
+        dlist = dest[field]
+        same = dholder is sholder
+        rest = [b for b in dlist if b not in chain]
+        at = max(0, min(index, len(dlist)))
+        if same:
+            # The index counts the whole list; take the chain out of it.
+            if at > i:
+                raise ValueError("a block cannot move into itself")
+            if at == i:
+                raise ValueError("that is where it already is")
+        seq = rest[:at] + chain + rest[at:]
+        for k, b in enumerate(seq):
+            if b["k"] in TERMINAL and k < len(seq) - 1:
+                raise ValueError("%s MUST BE THE LAST BLOCK OF ITS BODY" % b["k"].upper())
+        nodes = [self.nodes[b["id"]] for b in chain]
+        if same:
+            def edit(u):
+                body = list(u.body)
+                moved = body[i + soff:]
+                del body[i + soff:]
+                for n, node in enumerate(moved):
+                    body.insert(at + doff + n, node)
+                return u.with_changes(body=tuple(body))
+
+            return self._apply({id(dholder): edit})
+        whole = i == 0 and len(src) == len(chain) and not soff
+        pas = self._fresh({"k": "pass"})
+
+        def cut(u):
+            body = list(u.body)
+            del body[i + soff:]
+            if whole:
+                body = [pas]
+            return u.with_changes(body=tuple(body))
+
+        def put(u):
+            body = list(u.body)
+            for n, node in enumerate(nodes):
+                body.insert(doff + at + n, node)
+            return u.with_changes(body=tuple(body))
+
+        return self._apply({id(sholder): cut, id(dholder): put})
+
     # -- notes: comments and docstrings
 
     def set_notes(self, block_id, lines):

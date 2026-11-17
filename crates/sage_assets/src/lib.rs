@@ -8,6 +8,7 @@
 
 pub mod compressed;
 mod font;
+pub mod generated;
 mod image_asset;
 pub mod proportional;
 mod store;
